@@ -1,0 +1,29 @@
+batch_size: 128
+gradient_accumulation_steps: 4
+peak_learning_rate: 0.002
+end_learning_rate: 0.0001
+warmup_steps: 100
+total_steps: 10000
+weight_decay: 0.01
+
+# Model config
+vocab_size: 30000
+max_sequence_length: 32
+num_layers: 4
+num_heads: 8
+key_size: 32
+w_init_var: 0.02
+embed_init_var: 0.02
+mlp_size: 256
+value_size: 32
+model_size: 64
+dropout: 0.1
+
+# Data config
+dataset_path: ./data/imdb/
+tokenizer_path: ./tokenizers/imdb-30k/
+min_length: 32
+min_chars_per_token: 3
+
+# DataLoader config
+num_workers: 6
