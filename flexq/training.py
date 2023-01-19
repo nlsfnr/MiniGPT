@@ -202,6 +202,8 @@ def autosave(telemetry_iter: Iterator[TelemetryData],
     '''Save the model parameters and optimizer state etc. at regular intervals.'''
     for telemetry in telemetry_iter:
         if telemetry.step % frequency == 0:
+            import matplotlib.pyplot as plt
+            breakpoint()
             save_checkpoint(path,
                             config=telemetry.config,
                             params=telemetry.params,
@@ -329,11 +331,10 @@ def get_cli() -> click.Group:
         max_sequence_length: int
         num_layers: int
         num_heads: int
-        key_size: int
+        value_size: int
         w_init_var: float
         embed_init_var: float
         mlp_size: Optional[int] = None
-        value_size: Optional[int] = None
         model_size: Optional[int] = None
         dropout: float = 0.1
 

@@ -13,13 +13,13 @@ import click
 import datasets
 import lmdb
 import numpy as np
-import tokenizers  # type: ignore
 import tokenizers.processors
 import torch
-from tokenizers import Tokenizer  # type: ignore
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+import tokenizers  # type: ignore
+from tokenizers import Tokenizer  # type: ignore
 
 logger = logging.getLogger('NoLo')
 

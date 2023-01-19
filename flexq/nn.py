@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from functools import partial
 import logging
+from functools import partial
 from typing import Optional, Protocol
 
 import chex
@@ -11,7 +11,6 @@ import jax.numpy as jnp
 from chex import Array
 from einops import rearrange
 
-
 logger = logging.getLogger('NoLo')
 
 
@@ -19,9 +18,8 @@ class MultiHeadAttention(hk.Module):
 
     def __init__(self,
                  num_heads: int,
-                 key_size: int,
+                 value_size: int,
                  w_init: hk.initializers.Initializer,
-                 value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
                  name: Optional[str] = None,
@@ -30,19 +28,17 @@ class MultiHeadAttention(hk.Module):
 
         Args:
             num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
+            value_size: Size of the value vectors.
             w_init: Initializer for the attention weights.
-            value_size: Size of the value vectors. If None, use the key size.
-            model_size: Size of the model. If None, use the key size multiplied
+            model_size: Size of the model. If None, use the value size multiplied
                 by the number of heads.
             name: Name of the module.
         '''
         super().__init__(name=name)
         self.num_heads = num_heads
-        self.key_size = key_size
         self.w_init = w_init
-        self.value_size = value_size or key_size
-        self.model_size = model_size or key_size * num_heads
+        self.value_size = value_size
+        self.model_size = model_size or value_size * num_heads
         self.dropout = dropout
 
     def __call__(self,
@@ -52,9 +48,7 @@ class MultiHeadAttention(hk.Module):
         '''Compute multi-head attention.
 
         Args:
-            query: Query vectors. Shape: [batch_size, query_length, key_size].
-            key: Key vectors. Shape: [batch_size, key_length, key_size].
-            value: Value vectors. Shape: [batch_size, key_length, value_size].
+            x: Input tensor of shape [batch_size, length, model_size].
             is_training: Whether the model is in training mode.
 
         Returns:
@@ -63,19 +57,19 @@ class MultiHeadAttention(hk.Module):
         chex.assert_rank(x, 3)
         # Projections
         projection = partial(hk.Linear, w_init=self.w_init, with_bias=False)
-        q_proj = projection(self.key_size * self.num_heads, name='q_proj')
-        k_proj = projection(self.key_size * self.num_heads, name='k_proj')
-        v_proj = projection(self.value_size * self.num_heads, name='v_proj')
+        q_proj = projection(self.value_size * self.num_heads, name='q_proj')
+        kv_proj = projection(self.value_size * self.num_heads, name='kv_proj')
         o_proj = projection(self.model_size, name='o_proj')
-        # Q, K, V
-        q = q_proj(x) / x.shape[-1] ** 0.5  # B L H K
+        # Query and key/value
+        q = q_proj(x) / x.shape[-1] ** 0.5  # B L H V
         q = rearrange(q, 'b l (h k) -> b h l k', h=self.num_heads)
-        k = k_proj(x)  # B L H K
-        k = rearrange(k, 'b l (h k) -> b h l k', h=self.num_heads)
-        v = v_proj(x)  # B L H V
-        v = rearrange(v, 'b l (h v) -> b h l v', h=self.num_heads)
-        # Attention weights
-        l: Array = jnp.einsum('b h i k, b h j k -> b h i j', q, k)  # B H L L
+        kv = kv_proj(x)  # B L H K
+        kv = rearrange(kv, 'b l (h k) -> b h l k', h=self.num_heads)
+        # Attention logits
+        k_weights = hk.get_parameter('k_weights',
+                                     shape=(1, self.num_heads, 1, self.value_size),
+                                     init=hk.initializers.Constant(0.))  # 1 H 1 V
+        l: Array = jnp.einsum('b h i k, b h j k -> b h i j', q, kv * (1. + k_weights))  # B H L L
         # Mask the attention scores
         mask = jnp.tril(jnp.ones_like(l))
         l = jnp.where(mask, l, -1e6)  # type: ignore
@@ -83,7 +77,7 @@ class MultiHeadAttention(hk.Module):
             l = hk.dropout(hk.next_rng_key(), self.dropout, l)
         a = jax.nn.softmax(l, axis=-1)  # B H L L
         # Attention output
-        y = jnp.einsum('b h i j, b h j v -> b h i v', a, v)  # B H L V
+        y = jnp.einsum('b h i j, b h j v -> b h i v', a, kv)  # B H L V
         y = rearrange(y, 'b h l v -> b l (h v)')  # B L (H V)
         return o_proj(y)  # B L M
 
@@ -92,10 +86,9 @@ class EncoderBlock(hk.Module):
 
     def __init__(self,
                  num_heads: int,
-                 key_size: int,
+                 value_size: int,
                  w_init: hk.initializers.Initializer,
                  mlp_size: Optional[int] = None,
-                 value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
                  name: Optional[str] = None,
@@ -104,21 +97,19 @@ class EncoderBlock(hk.Module):
 
         Args:
             num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
+            value_size: Size of the value vectors.
             w_init: Initializer for the attention weights.
             mlp_size: Size of the MLP hidden layer. If None, use four times the model size.
-            value_size: Size of the value vectors. If None, use the key size.
             model_size: Size of the model. If None, use the key size multiplied
                 by the number of heads.
             name: Name of the module.
         '''
         super().__init__(name=name)
         self.num_heads = num_heads
-        self.key_size = key_size
         self.w_init = w_init
-        self.mlp_size = mlp_size or 4 * (model_size or key_size * num_heads)
-        self.value_size = value_size or key_size
-        self.model_size = model_size or key_size * num_heads
+        self.mlp_size = mlp_size or 4 * (model_size or value_size * num_heads)
+        self.value_size = value_size
+        self.model_size = model_size or value_size * num_heads
         self.dropout = dropout
 
     def __call__(self,
@@ -137,9 +128,8 @@ class EncoderBlock(hk.Module):
         chex.assert_rank(x, 3)
         mha_ln = hk.LayerNorm(-1, False, False, name='mha_ln')
         mha = MultiHeadAttention(self.num_heads,
-                                 self.key_size,
-                                 self.w_init,
                                  self.value_size,
+                                 self.w_init,
                                  self.model_size,
                                  self.dropout,
                                  name='mha')
@@ -164,10 +154,9 @@ class Encoder(hk.Module):
     def __init__(self,
                  num_layers: int,
                  num_heads: int,
-                 key_size: int,
+                 value_size: int,
                  w_init: hk.initializers.Initializer,
                  mlp_size: Optional[int] = None,
-                 value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
                  name: Optional[str] = None,
@@ -177,9 +166,8 @@ class Encoder(hk.Module):
         Args:
             num_layers: Number of layers.
             num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
+            value_size: Size of the value vectors.
             w_init: Initializer for the attention weights.
-            value_size: Size of the value vectors. If None, use the key size.
             model_size: Size of the model. If None, use the key size multiplied
                 by the number of heads.
             name: Name of the module.
@@ -187,11 +175,10 @@ class Encoder(hk.Module):
         super().__init__(name=name)
         self.num_layers = num_layers
         self.num_heads = num_heads
-        self.key_size = key_size
         self.w_init = w_init
-        self.mlp_size = mlp_size or 4 * (model_size or key_size * num_heads)
-        self.value_size = value_size or key_size
-        self.model_size = model_size or key_size * num_heads
+        self.mlp_size = mlp_size or 4 * (model_size or value_size * num_heads)
+        self.value_size = value_size
+        self.model_size = model_size or value_size * num_heads
         self.dropout = dropout
 
     def __call__(self,
@@ -210,10 +197,9 @@ class Encoder(hk.Module):
         chex.assert_rank(x, 3)
         for i in range(self.num_layers):
             x = EncoderBlock(num_heads=self.num_heads,
-                             key_size=self.key_size,
+                             value_size=self.value_size,
                              w_init=self.w_init,
                              mlp_size=self.mlp_size,
-                             value_size=self.value_size,
                              model_size=self.model_size,
                              dropout=self.dropout,
                              name=f'block_{i}')(x, is_training)
@@ -244,11 +230,10 @@ class ModelConfig(Protocol):
     max_sequence_length: int
     num_layers: int
     num_heads: int
-    key_size: int
+    value_size: int
     w_init_var: float
     embed_init_var: float
     mlp_size: Optional[int] = None
-    value_size: Optional[int] = None
     model_size: Optional[int] = None
     dropout: float = 0.1
 
@@ -260,11 +245,10 @@ class Model(hk.Module):
                  max_sequence_length: int,
                  num_layers: int,
                  num_heads: int,
-                 key_size: int,
+                 value_size: int,
                  w_init: hk.initializers.Initializer,
                  embed_init: hk.initializers.Initializer,
                  mlp_size: Optional[int] = None,
-                 value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
                  name: Optional[str] = None,
@@ -276,11 +260,10 @@ class Model(hk.Module):
             max_sequence_length: Maximum sequence length.
             num_layers: Number of stacked encoder blocks.
             num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
+            value_size: Size of the value vectors.
             w_init: Initializer for the attention weights.
             embed_init: Initializer for the embedding weights.
             mlp_size: Size of the MLP hidden layer. If None, use four times the model size.
-            value_size: Size of the value vectors. If None, use the key size.
             model_size: Size of the model. If None, use the key size multiplied
                 by the number of heads.
             name: Name of the module.
@@ -290,12 +273,11 @@ class Model(hk.Module):
         self.max_sequence_length = max_sequence_length
         self.num_layers = num_layers
         self.num_heads = num_heads
-        self.key_size = key_size
+        self.value_size = value_size
         self.w_init = w_init
         self.embed_init = embed_init
-        self.mlp_size = mlp_size or 4 * (model_size or key_size * num_heads)
-        self.value_size = value_size or key_size
-        self.model_size = model_size or key_size * num_heads
+        self.mlp_size = mlp_size or 4 * (model_size or value_size * num_heads)
+        self.model_size = model_size or value_size * num_heads
         self.dropout = dropout
 
     @classmethod
@@ -307,11 +289,10 @@ class Model(hk.Module):
                    max_sequence_length=config.max_sequence_length,
                    num_layers=config.num_layers,
                    num_heads=config.num_heads,
-                   key_size=config.key_size,
+                   value_size=config.value_size,
                    w_init=hk.initializers.TruncatedNormal(config.w_init_var),
                    embed_init=hk.initializers.TruncatedNormal(config.embed_init_var),
                    mlp_size=config.mlp_size,
-                   value_size=config.value_size,
                    model_size=config.model_size,
                    dropout=config.dropout)
 
@@ -337,10 +318,9 @@ class Model(hk.Module):
                                       self.model_size)(x)
         x = Encoder(num_layers=self.num_layers,
                     num_heads=self.num_heads,
-                    key_size=self.key_size,
+                    value_size=self.value_size,
                     w_init=self.w_init,
                     mlp_size=self.mlp_size,
-                    value_size=self.value_size,
                     model_size=self.model_size,
                     dropout=self.dropout,
                     name='encoder')(x, is_training)
@@ -365,4 +345,3 @@ class Model(hk.Module):
         params_mb = round(hk.data_structures.tree_bytes(params) / 1e6, 2)
         logger.info(f'Model parameters: {params_n:,} ({params_mb:.2f} MB)')
         return params
-

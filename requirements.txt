@@ -15,6 +15,7 @@ tqdm
 click
 pyyaml
 pydantic
+matplotlib
 
 # Dev-Ops
 mypy
