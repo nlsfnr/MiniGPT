@@ -312,6 +312,8 @@ def get_cli() -> click.Group:
                   help='Frequency at which to log metrics automatically')
     @click.option('--csv-path', type=Path, default=None,
                   help='Path to save metrics in a CSV file')
+    @click.option('--stop-at', type=int, default=None,
+                  help='Stop training after this many steps')
     @click.option('--seed', type=int, default=None, help='Random seed')
     @click.option('--debug', '-d', is_flag=True, help='Debug mode')
     def cli_train(config_path: Optional[Path],
@@ -320,6 +322,7 @@ def get_cli() -> click.Group:
                   save_frequency: int,
                   log_frequency: int,
                   csv_path: Optional[Path],
+                  stop_at: Optional[int],
                   seed: Optional[int],
                   debug: bool,
                   ) -> None:
@@ -349,8 +352,10 @@ def get_cli() -> click.Group:
         if csv_path is not None:
             telemetry_iter = log_to_csv(telemetry_iter, csv_path)
         telemetry_iter = autolog(telemetry_iter, log_frequency)
-        for _ in telemetry_iter:
-            pass
+        i = stop_at if stop_at is not None else -1
+        while i != 0:
+            next(telemetry_iter)
+            i -= 1
 
     return cli
 
