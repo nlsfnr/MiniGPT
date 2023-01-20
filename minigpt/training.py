@@ -286,8 +286,6 @@ def get_cli() -> click.Group:
         # Data config
         dataset_path: Path
         tokenizer_path: Path
-        min_length: int
-        min_chars_per_token: float
 
         # DataLoader config
         num_workers: int
