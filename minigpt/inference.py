@@ -80,6 +80,7 @@ def get_cli() -> click.Group:
         num_layers: int
         num_heads: int
         value_size: int
+        key_size: int
         w_init_var: float
         embed_init_var: float
         mlp_size: Optional[int] = None
