@@ -10,6 +10,7 @@ def test_nolo_multihead_attention_call() -> None:
     model = lambda x: nn.MultiHeadAttention(
         num_heads=2,
         w_init=hk.initializers.TruncatedNormal(stddev=0.02),
+        key_size=4,
         value_size=4,
         model_size=5,
         name='nolo_multihead_attention')(x, True)
@@ -25,6 +26,7 @@ def test_nolo_encoder_block_call() -> None:
     model = lambda x: nn.EncoderBlock(
         num_heads=2,
         w_init=hk.initializers.TruncatedNormal(stddev=0.02),
+        key_size=4,
         value_size=4,
         model_size=5,
         name='nolo_encoder_block')(x, True)
@@ -41,6 +43,7 @@ def test_nolo_encoder_call() -> None:
         num_layers=2,
         num_heads=2,
         w_init=hk.initializers.TruncatedNormal(stddev=0.02),
+        key_size=4,
         value_size=4,
         model_size=5,
         name='nolo_encoder')(x, True)
@@ -58,6 +61,7 @@ def test_nolo_model_call() -> None:
         max_sequence_length=3,
         num_layers=2,
         num_heads=2,
+        key_size=4,
         w_init=hk.initializers.TruncatedNormal(stddev=0.02),
         embed_init=hk.initializers.TruncatedNormal(stddev=0.02),
         mlp_size=20,

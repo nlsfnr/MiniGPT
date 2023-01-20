@@ -1,9 +1,9 @@
 VENV=.venv
 PYTHON=$(VENV)/bin/python3
-DOCKER=flexq
+DOCKER=minigpt
 PIP_FREEZE=.requirements.freeze.txt
-TEST_DIR=flexq/
-PY_FILES=flexq/
+TEST_DIR=minigpt/
+PY_FILES=minigpt/
 
 .PHONY: ci
 ci: $(PY_FILES) py-deps type-check lint test

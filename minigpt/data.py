@@ -21,7 +21,9 @@ from tqdm import tqdm
 import tokenizers  # type: ignore
 from tokenizers import Tokenizer  # type: ignore
 
-logger = logging.getLogger('NoLo')
+from . import common
+
+logger = logging.getLogger(common.NAME)
 
 
 # Disable CUDA for torch, since we only want Jax to use it
@@ -130,6 +132,7 @@ def load_hf_dataset(name: str,
     '''Loads a dataset from HuggingFace and stores it in an LMDB database'''
     dataset: Iterable[Dict[str, Any]]
     if name == 'imdb':
+        # Mostly for debugging
         dataset = datasets.load_dataset('imdb', split='unsupervised')
     elif name == 'wikitext':
         dataset = datasets.load_dataset('wikitext', 'wikitext-103-raw-v1', split='train')
@@ -273,12 +276,12 @@ def store_samples(samples: Iterator[Dict[str, Any]],
 def get_cli() -> click.Group:
     '''Get the command line interface for this module.'''
 
-    @click.group('NoLo-Data')
+    @click.group(common.NAME)
     @click.option('--log-level', default='INFO', help='Log level')
     def cli(log_level: str) -> None:
         logging.basicConfig(level=log_level,
                             format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s')
-        logger.info('Starting NoLo-Data')
+        logger.info(f'Starting {common.NAME}')
 
     @cli.command('new-dataset')
     @click.option('--path', '-p', type=Path, required=True, help='Where to save the dataset')
