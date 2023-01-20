@@ -21,7 +21,12 @@ from tqdm import tqdm
 import tokenizers  # type: ignore
 from tokenizers import Tokenizer  # type: ignore
 
-from . import common
+if __name__ == '__main__':
+    # If the module is executed we need to add the parent module to the discoverable imports
+    import sys
+    sys.path.append('.')
+
+from minigpt import common
 
 logger = logging.getLogger(common.NAME)
 
