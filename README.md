@@ -1,17 +1,19 @@
 # MiniGPT
 
-This is MiniGPT, a language model built using *JAX*, *Haiku* and *Optax* for
-machine learning and the Huggingface libraries *datasets* and *tokenizers* for
-data. The neural network components are all implemented from scratch and are
-well documented.
+This is MiniGPT, a GPT-like language model built using *JAX*, *Haiku* and
+*Optax*. The neural network components are all implemented from scratch and are
+well documented. This project was loosely inspired by A. Karpathy's
+[miniGPT](https://github.com/karpathy/minGPT).
 
 ## Quick tour
 
-If you want to see code, I encourage you to check out the following files:
+If you want to see the code, I encourage you to check out the following files:
 
 1. [`./minigpt/nn.py`](/minigpt/nn.py) - The model and its components.
-2. [`./minigpt/training.py`](/minigpt/training.py) - The training loop and loss function.
-3. [`./minigpt/inference.py`](/minigpt/inference.py) - Methods to use pretrained models for inference.
+1. [`./minigpt/training.py`](/minigpt/training.py) - The training loop and loss
+   function.
+1. [`./minigpt/inference.py`](/minigpt/inference.py) - Methods to use
+   pretrained models for inference.
 
 ## Getting Started
 
@@ -31,7 +33,8 @@ This will download the Wikitext dataset and store it inside `./data/wikitext/`.
 Only samples with more than 32 characters and more than 3 characters per token
 after tokenization with the `bert-base-uncased` tokenizer. The latter is a
 relatively reliable and easy way of ensuring that all samples consist of
-natural language, taken from the [Cramming] paper by Geiping et. al.
+natural language, taken from the [*Cramming*
+paper](https://github.com/karpathy/minGPT) by Geiping et. al.
 
 Then, to train a tokenizer on the dataset, run:
 
@@ -75,5 +78,3 @@ To interrupt training, press Ctr+C. Once done, you can sample from the model wit
     --load-from ./model-zoo
     --prompt "GPT is a"
 ```
-
-[Cramming]: http://arxiv-export3.library.cornell.edu/abs/2212.14034?context=cs
