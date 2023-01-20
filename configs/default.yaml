@@ -20,8 +20,8 @@ model_size: 64
 dropout: 0.1
 
 # Data config
-dataset_path: ./data/imdb/
-tokenizer_path: ./tokenizers/imdb-30k/
+dataset_path: ./data/wikitext/
+tokenizer_path: ./tokenizers/wikitext-30k
 
 # DataLoader config
 num_workers: 6
