@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from itertools import islice, tee
 from multiprocessing import cpu_count
 from pathlib import Path
@@ -23,7 +24,6 @@ from tokenizers import Tokenizer  # type: ignore
 
 if __name__ == '__main__':
     # If the module is executed we need to add the parent module to the discoverable imports
-    import sys
     sys.path.append('.')
 
 from minigpt import common
@@ -73,6 +73,9 @@ class LMDBDataset(Dataset):
                  tokenizer: TokenizerLike,
                  ) -> None:
         self.db_path = db_path
+        if not db_path.exists():
+            logger.error(f'LMDB database {db_path} does not exist')
+            raise FileNotFoundError(db_path)
         self.tokenizer = get_tokenizer(tokenizer)
         self.env = lmdb.open(str(db_path), readonly=True, lock=False, readahead=False,
                              meminit=False)
@@ -127,6 +130,7 @@ def get_tokenizer(t: TokenizerLike) -> Tokenizer:
     '''Ensures that the tokenizer is a transformers.PreTrainedTokenizer'''
     if isinstance(t, Path):
         if not t.exists():
+            logger.error(f'Tokenizer {t} does not exist')
             raise FileNotFoundError(f'Could not find tokenizer at {t}')
         return Tokenizer.from_file(str(t))
     return t
@@ -281,12 +285,7 @@ def store_samples(samples: Iterator[Dict[str, Any]],
 def get_cli() -> click.Group:
     '''Get the command line interface for this module.'''
 
-    @click.group(common.NAME)
-    @click.option('--log-level', default='INFO', help='Log level')
-    def cli(log_level: str) -> None:
-        logging.basicConfig(level=log_level,
-                            format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s')
-        logger.info(f'Starting {common.NAME}')
+    cli = common.get_cli_group('data')
 
     @cli.command('new-dataset')
     @click.option('--path', '-p', type=Path, required=True, help='Where to save the dataset')

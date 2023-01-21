@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import sys
 import time
 from abc import abstractmethod
 from dataclasses import dataclass
@@ -25,7 +26,6 @@ from einops import rearrange
 
 if __name__ == '__main__':
     # If the module is executed we need to add the parent module to the discoverable imports
-    import sys
     sys.path.append('.')
 
 from minigpt import common, data, nn
@@ -290,12 +290,7 @@ def get_cli() -> click.Group:
         # DataLoader config
         num_workers: int
 
-    @click.group(common.NAME)
-    @click.option('--log-level', default='INFO', help='Log level')
-    def cli(log_level: str) -> None:
-        logging.basicConfig(level=log_level,
-                            format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s')
-        logger.info(f'Starting {common.NAME}')
+    cli = common.get_cli_group('training')
 
     @cli.command('train')
     @click.option('--config-path', '-c', type=Path, default=None,

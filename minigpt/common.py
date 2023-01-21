@@ -2,16 +2,17 @@ import json
 import logging
 import pickle
 import random
+import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Type, TypeVar, Union
+from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
 import chex
+import click
 import haiku as hk
 import jax
 import optax
 import pydantic
 import yaml
-
 
 NAME = 'MiniGPT'
 
@@ -106,3 +107,28 @@ def load_checkpoint(path: Path,
                 opt_state=opt_state,
                 rngs=rngs,
                 step=step)
+
+
+def get_cli_group(name: str) -> click.Group:
+    '''Get a click group with a common set of options.'''
+    full_name = f'{NAME} - {name}'
+
+    @click.group(full_name)
+    @click.option('--log-level', default='INFO', help='Log level')
+    @click.option('--log-to-stdout', is_flag=True, help='Log to stdout instead of stderr')
+    @click.option('--logfile', type=Path, default=Path('./logs.log'), help='Log file')
+    def cli(log_level: str,
+            log_to_stdout: bool,
+            logfile: Optional[Path],
+            ) -> None:
+        '''MiniGPT, a GPT-like language model'''
+        handlers: List[logging.Handler] = []
+        handlers.append(logging.StreamHandler(sys.stdout if log_to_stdout else sys.stderr))
+        if logfile is not None:
+            handlers.append(logging.FileHandler(logfile))
+        logging.basicConfig(level=log_level,
+                            format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s',
+                            handlers=handlers)
+        logger.info(f'Starting {full_name}')
+
+    return cli

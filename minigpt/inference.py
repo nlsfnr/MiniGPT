@@ -87,12 +87,7 @@ def get_cli() -> click.Group:
         model_size: Optional[int] = None
         dropout: float = 0.1
 
-    @click.group(common.NAME)
-    @click.option('--log-level', default='INFO', help='Log level')
-    def cli(log_level: str) -> None:
-        logging.basicConfig(level=log_level,
-                            format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s')
-        logger.info(f'Starting {common.NAME}')
+    cli = common.get_cli_group('inference')
 
     @cli.command('generate')
     @click.option('--prompt', '-p', default='', help='Prompt for the model')
