@@ -67,10 +67,11 @@ class TelemetryData:
     epoch: int
     params: ArrayTree
     opt_state: optax.OptState
+    loss_scale: jmp.LossScale
     config: TrainingConfig
     rngs: hk.PRNGSequence
-    time_taken_s: float
     gradients: ArrayTree
+    gradients_finite: bool
     loss: Array
     losses: Array
     logits: Array
@@ -94,11 +95,6 @@ def train(config: TrainingConfig,
     # Helper function for dealing with multiple devices
     device_count = jax.device_count()
     logger.info(f'Devices found: {device_count}.')
-    broadcast_to_devices = lambda o: jax.tree_util.tree_map(
-        lambda x: jnp.broadcast_to(x, (device_count, *x.shape)), o)
-    get_from_first_device = lambda o: jax.tree_util.tree_map(lambda x: x[0], o)
-    concat_from_devices = lambda o: jax.tree_util.tree_map(
-        lambda x: rearrange(x, 'd b ... -> (d b) ...'), o)
     # Broadcast components across devices
     params = broadcast_to_devices(params)
     opt_state = broadcast_to_devices(opt_state)
@@ -110,30 +106,29 @@ def train(config: TrainingConfig,
             # information is not accurate within one step and should only be
             # considered across multiple steps.
             # See: https://jax.readthedocs.io/en/latest/async_dispatch.html
-            start_time = time.perf_counter()
             indices = policy.cast_to_compute(indices)
             # Split indices and RNG betweenn devices
             indices = rearrange(indices, '(d b) ... -> d b ...', d=device_count)
             rng = jax.random.split(next(rngs), num=device_count)
             params, opt_state, loss_scale, telemetry_dict = train_step_jit(
                 indices, params, opt_state, loss_scale, rng)
-            end_time = time.perf_counter()
             yield TelemetryData(step=step,
                                 epoch=epoch,
                                 params=get_from_first_device(params),
                                 opt_state=get_from_first_device(opt_state),
+                                loss_scale=get_from_first_device(loss_scale),
                                 config=config,
                                 rngs=rngs,
-                                time_taken_s=end_time - start_time,
                                 gradients=get_from_first_device(telemetry_dict['gradients']),
                                 loss=jnp.mean(telemetry_dict['loss']),
                                 losses=concat_from_devices(telemetry_dict['losses']),
-                                logits=concat_from_devices(telemetry_dict['logits']))
+                                logits=concat_from_devices(telemetry_dict['logits']),
+                                gradients_finite=concat_from_devices(telemetry_dict['gradients_finite']).all())
             step += 1
         logger.info(f'Epoch {epoch + 1:,} finished')
 
 
-def train_step(indices: Iterable[Array],
+def train_step(indices: Array,
                params: ArrayTree,
                opt_state: optax.OptState,
                loss_scale: jmp.LossScale,
@@ -165,7 +160,9 @@ def train_step(indices: Iterable[Array],
     return (params,
             opt_state,
             loss_scale,
-            dict(telemetry_dict, gradients=gradients))
+            dict(telemetry_dict,
+                 gradients=gradients,
+                 gradients_finite=gradients_finite))
 
 
 def loss_fn(indices: Array,
@@ -262,6 +259,24 @@ def get_optimizer_state(config: TrainingConfig,
     return opt_state
 
 
+def broadcast_to_devices(obj: T) -> T:
+    device_count = jax.device_count()
+    fn = lambda x: (jnp.broadcast_to(x, (device_count, *x.shape))
+                    if isinstance(x, Array) else
+                    x)
+    return jax.tree_util.tree_map(fn, obj)
+
+
+def get_from_first_device(obj: T) -> T:
+    fn = lambda x: x[0] if isinstance(x, Array) else x
+    return jax.tree_util.tree_map(fn, obj)
+
+
+def concat_from_devices(obj: T) -> T:
+    fn = lambda x: rearrange(x, 'd b ... -> (d b) ...') if isinstance(x, Array) else x
+    return jax.tree_util.tree_map(fn, obj)
+
+
 def autosave(telemetry_iter: Iterator[TelemetryData],
              frequency: int,
              path: Path,
@@ -276,6 +291,7 @@ def autosave(telemetry_iter: Iterator[TelemetryData],
                                    params=telemetry.params,
                                    opt_state=telemetry.opt_state,
                                    rngs=telemetry.rngs,
+                                   loss_scale=telemetry.loss_scale,
                                    step=telemetry.step)
         yield telemetry
 
@@ -285,18 +301,13 @@ def autolog(telemetry_iter: Iterator[TelemetryData],
             ) -> Iterator[TelemetryData]:
     '''Log the telemetry data at the specified frequency.'''
     loss_history = []
-    time_taken_history = []
     for telemetry in telemetry_iter:
         loss_history.append(telemetry.loss)
-        time_taken_history.append(telemetry.time_taken_s)
         if telemetry.step % frequency == 0 and loss_history:
             mean_loss = jnp.mean(jnp.asarray(loss_history))
-            mean_time_taken = jnp.mean(jnp.asarray(time_taken_history))
             logger.info(f'Step: {telemetry.step:,}'
-                        f' | loss: {mean_loss:.4f}'
-                        f' | S/step: {mean_time_taken:.4f}')
+                        f' | loss: {mean_loss:.4f}')
             loss_history.clear()
-            time_taken_history.clear()
         yield telemetry
 
 
@@ -311,7 +322,7 @@ def log_to_csv(telemetry_iter: Iterator[TelemetryData],
         path.touch()
     with path.open('a') as f:
         writer = csv.DictWriter(f, fieldnames=[
-            'time', 'step', 'epoch', 'loss', 'time_taken_s', 'learning_rate'])
+            'time', 'step', 'epoch', 'loss', 'learning_rate'])
         if not did_exist:
             writer.writeheader()
         for telemetry in telemetry_iter:
@@ -321,7 +332,6 @@ def log_to_csv(telemetry_iter: Iterator[TelemetryData],
                                  step=telemetry.step,
                                  epoch=telemetry.epoch,
                                  loss=telemetry.loss,
-                                 time_taken_s=telemetry.time_taken_s,
                                  learning_rate=lr_sched(telemetry.step)))
             yield telemetry
 
@@ -401,6 +411,7 @@ def get_cli() -> click.Group:
             params = nn.Model.get_params(config, next(rngs))
             opt_state = get_optimizer_state(config, params)
             step = 0
+            loss_scale = None
         else:
             assert load_from is not None
             checkpoint = common.load_checkpoint(load_from, config_class=Config)
@@ -409,8 +420,15 @@ def get_cli() -> click.Group:
             params = checkpoint['params']
             opt_state = checkpoint['opt_state']
             step = checkpoint['step']
+            loss_scale = checkpoint['loss_scale']
         dataloader = data.LMDBDataset.from_config(config).get_dataloader_from_config(config)
-        telemetry_iter = train(config, params, opt_state, dataloader, rngs, step)
+        telemetry_iter = train(config=config,
+                               params=params,
+                               opt_state=opt_state,
+                               dataloader=dataloader,
+                               rngs=rngs,
+                               loss_scale=loss_scale,
+                               step=step)
         if save_path is not None:
             telemetry_iter = autosave(telemetry_iter, save_frequency, save_path)
         if csv_path is not None:
