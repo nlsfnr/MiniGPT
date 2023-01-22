@@ -32,8 +32,13 @@ test: $(VENV) $(PY_FILES)
 py-deps: $(PIP_FREEZE)
 
 $(PIP_FREEZE): $(VENV) requirements.txt
-	$(PYTHON) -m pip install --upgrade --require-virtualenv pip
-	$(PYTHON) -m pip install --upgrade --require-virtualenv \
+	$(PYTHON) -m pip install \
+		--upgrade \
+		--require-virtualenv \
+		pip
+	$(PYTHON) -m pip install \
+		--upgrade \
+		--require-virtualenv \
 		-r requirements.txt
 	$(PYTHON) -m pip freeze > $(PIP_FREEZE)
 

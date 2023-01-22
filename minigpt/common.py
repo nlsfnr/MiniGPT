@@ -1,3 +1,4 @@
+'''Common functionality shared across modules.'''
 import json
 import logging
 import pickle
@@ -10,6 +11,7 @@ import chex
 import click
 import haiku as hk
 import jax
+import jmp
 import optax
 import pydantic
 import yaml
@@ -23,6 +25,8 @@ def set_debug(debug: bool) -> None:
     jax.config.update('jax_debug_nans', debug)
     jax.config.update('jax_debug_infs', debug)
     jax.config.update('jax_disable_jit', debug)
+    if debug:
+        logger.warn('Running in debug mode')
 
 
 def get_rngs(seed: Optional[Union[hk.PRNGSequence, int]] = None,
@@ -61,6 +65,7 @@ def save_checkpoint(path: Path,
                     params: chex.ArrayTree,
                     opt_state: optax.OptState,
                     rngs: hk.PRNGSequence,
+                    loss_scale: jmp.LossScale,
                     step: int,
                     ) -> None:
     '''Save the checkpoint to a directory.'''
@@ -79,6 +84,9 @@ def save_checkpoint(path: Path,
     # Save the RNGs
     with open(path / 'rngs.pkl', 'wb') as f:
         pickle.dump(rngs, f)
+    # Save the loss scale
+    with open(path / 'loss_scale.pkl', 'wb') as f:
+        pickle.dump(loss_scale, f)
     logger.info(f'Saved checkpoint to {path} at step {step:,}.')
 
 
@@ -102,11 +110,15 @@ def load_checkpoint(path: Path,
         rngs_internal_state = pickle.load(f).internal_state
     rngs = hk.PRNGSequence(0)
     rngs.replace_internal_state(rngs_internal_state)
+    # Load the loss scale
+    with open(path / 'loss_scale.pkl', 'rb') as f:
+        loss_scale = pickle.load(f)
     return dict(config=config,
                 params=params,
                 opt_state=opt_state,
                 rngs=rngs,
-                step=step)
+                step=step,
+                loss_scale=loss_scale)
 
 
 def get_cli_group(name: str) -> click.Group:
@@ -117,9 +129,11 @@ def get_cli_group(name: str) -> click.Group:
     @click.option('--log-level', default='INFO', help='Log level')
     @click.option('--log-to-stdout', is_flag=True, help='Log to stdout instead of stderr')
     @click.option('--logfile', type=Path, default=Path('./logs.log'), help='Log file')
+    @click.option('--debug', '-d', is_flag=True, help='Debug mode')
     def cli(log_level: str,
             log_to_stdout: bool,
             logfile: Optional[Path],
+            debug: bool,
             ) -> None:
         '''MiniGPT, a GPT-like language model'''
         handlers: List[logging.Handler] = []
@@ -130,5 +144,6 @@ def get_cli_group(name: str) -> click.Group:
                             format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s',
                             handlers=handlers)
         logger.info(f'Starting {full_name}')
+        set_debug(debug)
 
     return cli

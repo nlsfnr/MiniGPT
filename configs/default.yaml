@@ -1,4 +1,7 @@
 batch_size: 128
+use_half_precision: true
+loss_scale_period: 50
+initial_loss_scale_log2: 15
 gradient_accumulation_steps: 4
 peak_learning_rate: 0.002
 end_learning_rate: 0.0001

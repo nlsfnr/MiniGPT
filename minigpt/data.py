@@ -8,7 +8,7 @@ from itertools import islice, tee
 from multiprocessing import cpu_count
 from pathlib import Path
 from typing import (Any, Dict, Iterable, Iterator, List, Optional, Protocol,
-                    TypeVar, Union)
+                    Tuple, TypeVar, Union)
 
 import click
 import datasets
@@ -141,7 +141,6 @@ def load_hf_dataset(name: str,
     '''Loads a dataset from HuggingFace and stores it in an LMDB database'''
     dataset: Iterable[Dict[str, Any]]
     if name == 'imdb':
-        # Mostly for debugging
         dataset = datasets.load_dataset('imdb', split='unsupervised')
     elif name == 'wikitext':
         dataset = datasets.load_dataset('wikitext', 'wikitext-103-raw-v1', split='train')
@@ -282,6 +281,25 @@ def store_samples(samples: Iterator[Dict[str, Any]],
         txn.put('keys'.encode(), json.dumps(keys).encode())
 
 
+def get_n_tokens(db_like: DatasetLike,
+                 tokenizer_like: TokenizerLike,
+                 max_samples: Optional[int] = None,
+                 ) -> Tuple[int, float]:
+    '''Get the number of tokens in a dataset. To avoid tokenizing the entire
+    dataset only max_sampes are tokenzied and the total number of tokens in the
+    dataset are extrapolated from there. Returns the estimated number of tokens
+    and the variance of tokens pers sample across the tokenized samples.'''
+    tokenizer = get_tokenizer(tokenizer_like)
+    ds = get_dataset(db_like, tokenizer)
+    keys = (ds.keys
+            if max_samples is None else
+            np.random.permutation(ds.keys)[:max_samples])
+    n_tokens = []
+    for key in keys:
+        n_tokens.append(len(ds[key]['input_ids']))
+    return int(sum(n_tokens) * len(ds) / len(keys)), float(np.var(n_tokens))
+
+
 def get_cli() -> click.Group:
     '''Get the command line interface for this module.'''
 
@@ -339,6 +357,8 @@ def get_cli() -> click.Group:
         logger.info('Done')
 
     return cli
+
+    # TODO: Add CLI endpoint for n_token estimation
 
 
 if __name__ == '__main__':
