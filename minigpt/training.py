@@ -6,15 +6,14 @@ from __future__ import annotations
 import csv
 import logging
 import sys
-import time
 from abc import abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from itertools import count
 from pathlib import Path
-from typing import (Any, Dict, Iterable, Iterator, Optional, Protocol, Tuple,
-                    Type, TypeVar)
+from typing import (Any, Dict, Iterator, Optional, Protocol, Tuple, Type,
+                    TypeVar)
 
 import click
 import haiku as hk
@@ -112,18 +111,19 @@ def train(config: TrainingConfig,
             rng = jax.random.split(next(rngs), num=device_count)
             params, opt_state, loss_scale, telemetry_dict = train_step_jit(
                 indices, params, opt_state, loss_scale, rng)
-            yield TelemetryData(step=step,
-                                epoch=epoch,
-                                params=get_from_first_device(params),
-                                opt_state=get_from_first_device(opt_state),
-                                loss_scale=get_from_first_device(loss_scale),
-                                config=config,
-                                rngs=rngs,
-                                gradients=get_from_first_device(telemetry_dict['gradients']),
-                                loss=jnp.mean(telemetry_dict['loss']),
-                                losses=concat_from_devices(telemetry_dict['losses']),
-                                logits=concat_from_devices(telemetry_dict['logits']),
-                                gradients_finite=concat_from_devices(telemetry_dict['gradients_finite']).all())
+            yield TelemetryData(
+                step=step,
+                epoch=epoch,
+                params=get_from_first_device(params),
+                opt_state=get_from_first_device(opt_state),
+                loss_scale=get_from_first_device(loss_scale),
+                config=config,
+                rngs=rngs,
+                gradients=get_from_first_device(telemetry_dict['gradients']),
+                loss=jnp.mean(telemetry_dict['loss']),
+                losses=concat_from_devices(telemetry_dict['losses']),
+                logits=concat_from_devices(telemetry_dict['logits']),
+                gradients_finite=concat_from_devices(telemetry_dict['gradients_finite']).all())
             step += 1
         logger.info(f'Epoch {epoch + 1:,} finished')
 
@@ -336,42 +336,92 @@ def log_to_csv(telemetry_iter: Iterator[TelemetryData],
             yield telemetry
 
 
+class Config(common.YamlConfig):
+
+    # Training config
+    batch_size: int
+    use_half_precision: bool
+    loss_scale_period: Optional[int]
+    initial_loss_scale_log2: Optional[int]
+    gradient_accumulation_steps: int  # Must divide batch_size
+    peak_learning_rate: float
+    end_learning_rate: float
+    warmup_steps: int
+    total_steps: Optional[int]
+    weight_decay: float
+
+    # Model config
+    vocab_size: int
+    max_sequence_length: int
+    num_layers: int
+    num_heads: int
+    value_size: int
+    key_size: int
+    w_init_var: float
+    embed_init_var: float
+    mlp_size: Optional[int] = None
+    model_size: Optional[int] = None
+    dropout: float = 0.1
+
+    # Data config
+    dataset_path: Path
+    tokenizer_path: Path
+
+    # DataLoader config
+    num_workers: int
+
+
+def easy_train(config_path: Optional[Path],
+               load_from: Optional[Path],
+               save_path: Optional[Path],
+               save_frequency: int,
+               log_frequency: int,
+               csv_path: Optional[Path],
+               stop_at: Optional[int],
+               seed: Optional[int],
+               ) -> None:
+    '''Train a model.'''
+    if config_path is None and load_from is None:
+        raise ValueError('Either a configuration file or a checkpoint must be provided')
+    if config_path is not None and load_from is not None:
+        raise ValueError('Only one of configuration file or checkpoint must be provided')
+    if config_path is not None:
+        config = Config.from_yaml(config_path)
+        rngs = common.get_rngs(seed)
+        params = nn.Model.get_params(config, next(rngs))
+        opt_state = get_optimizer_state(config, params)
+        step = 0
+        loss_scale = None
+    else:
+        assert load_from is not None
+        checkpoint = common.load_checkpoint(load_from, config_class=Config)
+        config = checkpoint['config']
+        rngs = checkpoint['rngs']
+        params = checkpoint['params']
+        opt_state = checkpoint['opt_state']
+        step = checkpoint['step']
+        loss_scale = checkpoint['loss_scale']
+    dataloader = data.LMDBDataset.from_config(config).get_dataloader_from_config(config)
+    telemetry_iter = train(config=config,
+                           params=params,
+                           opt_state=opt_state,
+                           dataloader=dataloader,
+                           rngs=rngs,
+                           loss_scale=loss_scale,
+                           step=step)
+    if save_path is not None:
+        telemetry_iter = autosave(telemetry_iter, save_frequency, save_path)
+    if csv_path is not None:
+        telemetry_iter = log_to_csv(telemetry_iter, csv_path)
+    telemetry_iter = autolog(telemetry_iter, log_frequency)
+    i = stop_at if stop_at is not None else -1
+    while i != 0:
+        next(telemetry_iter)
+        i -= 1
+
+
 def get_cli() -> click.Group:
     '''Get the command line interface for this module.'''
-
-    class Config(common.YamlConfig):
-
-        # Training config
-        batch_size: int
-        use_half_precision: bool
-        loss_scale_period: Optional[int]
-        initial_loss_scale_log2: Optional[int]
-        gradient_accumulation_steps: int  # Must divide batch_size
-        peak_learning_rate: float
-        end_learning_rate: float
-        warmup_steps: int
-        total_steps: Optional[int]
-        weight_decay: float
-
-        # Model config
-        vocab_size: int
-        max_sequence_length: int
-        num_layers: int
-        num_heads: int
-        value_size: int
-        key_size: int
-        w_init_var: float
-        embed_init_var: float
-        mlp_size: Optional[int] = None
-        model_size: Optional[int] = None
-        dropout: float = 0.1
-
-        # Data config
-        dataset_path: Path
-        tokenizer_path: Path
-
-        # DataLoader config
-        num_workers: int
 
     cli = common.get_cli_group('training')
 
@@ -391,53 +441,8 @@ def get_cli() -> click.Group:
     @click.option('--stop-at', type=int, default=None,
                   help='Stop training after this many steps')
     @click.option('--seed', type=int, default=None, help='Random seed')
-    def cli_train(config_path: Optional[Path],
-                  load_from: Optional[Path],
-                  save_path: Optional[Path],
-                  save_frequency: int,
-                  log_frequency: int,
-                  csv_path: Optional[Path],
-                  stop_at: Optional[int],
-                  seed: Optional[int],
-                  ) -> None:
-        '''Train a model.'''
-        if config_path is None and load_from is None:
-            raise ValueError('Either a configuration file or a checkpoint must be provided')
-        if config_path is not None and load_from is not None:
-            raise ValueError('Only one of configuration file or checkpoint must be provided')
-        if config_path is not None:
-            config = Config.from_yaml(config_path)
-            rngs = common.get_rngs(seed)
-            params = nn.Model.get_params(config, next(rngs))
-            opt_state = get_optimizer_state(config, params)
-            step = 0
-            loss_scale = None
-        else:
-            assert load_from is not None
-            checkpoint = common.load_checkpoint(load_from, config_class=Config)
-            config = checkpoint['config']
-            rngs = checkpoint['rngs']
-            params = checkpoint['params']
-            opt_state = checkpoint['opt_state']
-            step = checkpoint['step']
-            loss_scale = checkpoint['loss_scale']
-        dataloader = data.LMDBDataset.from_config(config).get_dataloader_from_config(config)
-        telemetry_iter = train(config=config,
-                               params=params,
-                               opt_state=opt_state,
-                               dataloader=dataloader,
-                               rngs=rngs,
-                               loss_scale=loss_scale,
-                               step=step)
-        if save_path is not None:
-            telemetry_iter = autosave(telemetry_iter, save_frequency, save_path)
-        if csv_path is not None:
-            telemetry_iter = log_to_csv(telemetry_iter, csv_path)
-        telemetry_iter = autolog(telemetry_iter, log_frequency)
-        i = stop_at if stop_at is not None else -1
-        while i != 0:
-            next(telemetry_iter)
-            i -= 1
+    def cli_easy_train(*args, **kwargs) -> None:
+        easy_train(*args, **kwargs)
 
     return cli
 
