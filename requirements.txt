@@ -17,6 +17,7 @@ click
 pyyaml
 pydantic
 matplotlib
+modal
 
 # Dev-Ops
 mypy

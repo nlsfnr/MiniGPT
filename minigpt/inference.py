@@ -102,7 +102,7 @@ def get_cli() -> click.Group:
                      ) -> None:
         '''Generate text from a model.'''
         rngs = common.get_rngs(seed)
-        checkpoint = common.load_checkpoint(load_from, config_class=Config)
+        checkpoint = common.load_checkpoint(load_from, config_class=Config, for_inference=True)
         config = checkpoint['config']
         params = checkpoint['params']
         tokens = generate(rng=next(rngs),

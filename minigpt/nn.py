@@ -84,7 +84,7 @@ class MultiHeadAttention(hk.Module):
         # Attention weights
         l: Array = jnp.einsum('b h i k, b h j k -> b h i j', q, k)  # B H L L
         mask = jnp.tril(jnp.ones_like(l))
-        l = jnp.where(mask, l, -1e6)
+        l = jnp.where(mask, l, -1e8)
         if is_training:
             l = hk.dropout(hk.next_rng_key(), self.dropout, l)
         a = jax.nn.softmax(l, axis=-1)  # B H L L

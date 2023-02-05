@@ -28,6 +28,14 @@ if __name__ == '__main__':
 
 from minigpt import common
 
+
+LMDB_MAP_SIZE = 1 << 40
+UNK_TOKEN = '[UNK]'
+BOS_TOKEN = '[BOS]'
+EOS_TOKEN = '[EOS]'
+PAD_TOKEN = '[PAD]'
+
+
 logger = logging.getLogger(common.NAME)
 
 
@@ -46,13 +54,6 @@ class DataLoaderConfig(Protocol):
     batch_size: int
     num_workers: int
     max_sequence_length: int
-
-
-LMDB_MAP_SIZE = 1 << 40
-UNK_TOKEN = '[UNK]'
-BOS_TOKEN = '[BOS]'
-EOS_TOKEN = '[EOS]'
-PAD_TOKEN = '[PAD]'
 
 
 TokenizerLike = Union[Path, Tokenizer]
@@ -224,11 +225,10 @@ def into_chunks(iterable: Iterator[T], size: int) -> Iterator[List[T]]:
 
 
 def new_tokenizer(samples_or_db_path: Union[Iterator[Dict[str, Any]], Path],
-                  path: Path,
                   vocab_size: int = 1 << 15,
                   min_frequency: int = 10,
                   tokenizer_kind: str = 'sentencepiece',
-                  ) -> None:
+                  ) -> tokenizers.Tokenizer:
     '''Create a new tokenizer from a stream of samples.'''
     # Resolce the samples
     if isinstance(samples_or_db_path, Path):
@@ -245,16 +245,22 @@ def new_tokenizer(samples_or_db_path: Union[Iterator[Dict[str, Any]], Path],
     tokenizer.train_from_iterator((sample['text'] for sample in samples),
                                   special_tokens=[UNK_TOKEN, BOS_TOKEN, EOS_TOKEN, PAD_TOKEN],
                                   vocab_size=vocab_size, min_frequency=min_frequency)
-    t2id = tokenizer.token_to_id
     tokenizer.post_processor = tokenizers.processors.TemplateProcessing(
         single=f'{BOS_TOKEN} $A {EOS_TOKEN}',
-        special_tokens=[(UNK_TOKEN, t2id(UNK_TOKEN)),
-                        (BOS_TOKEN, t2id(BOS_TOKEN)),
-                        (EOS_TOKEN, t2id(EOS_TOKEN)),
-                        (PAD_TOKEN, t2id(PAD_TOKEN))])
-    # Save the tokenizer
+        special_tokens=[(UNK_TOKEN, tokenizer.token_to_id(UNK_TOKEN)),
+                        (BOS_TOKEN, tokenizer.token_to_id(BOS_TOKEN)),
+                        (EOS_TOKEN, tokenizer.token_to_id(EOS_TOKEN)),
+                        (PAD_TOKEN, tokenizer.token_to_id(PAD_TOKEN))])
+    return tokenizer
+
+
+def save_tokenizer(tokenizer: TokenizerLike,
+                   path: Path,
+                   ) -> tokenizers.Tokenizer:
+    tokenizer = get_tokenizer(tokenizer)
     path.parent.mkdir(parents=True, exist_ok=True)
     tokenizer.save(str(path))
+    return tokenizer
 
 
 def load_samples(db_path: Path) -> Iterator[Dict[str, Any]]:
@@ -353,7 +359,8 @@ def get_cli() -> click.Group:
         '''Create a new tokenizer from a database.'''
         logger.info(f'Creating a new tokenizer at {path} with kind {kind}, '
                     f'vocab size {vocab_size}, min frequency {min_frequency}')
-        new_tokenizer(db_path, path, vocab_size, min_frequency, kind)
+        tokenizer = new_tokenizer(db_path, vocab_size, min_frequency, kind)
+        save_tokenizer(tokenizer, path)
         logger.info('Done')
 
     return cli

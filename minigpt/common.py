@@ -92,12 +92,16 @@ def save_checkpoint(path: Path,
 
 def load_checkpoint(path: Path,
                     config_class: Type[YamlConfig],
+                    for_inference: bool = False,
                     ) -> Dict[str, Any]:
     '''Load the checkpoint from a directory.'''
     config = config_class.from_yaml(path / 'config.yaml')
     # Load the parameters
     with open(path / 'params.pkl', 'rb') as f:
         params = pickle.load(f)
+    if for_inference:
+        return dict(config=config,
+                    params=params)
     # Load the optimizer state
     with open(path / 'opt_state.pkl', 'rb') as f:
         opt_state = pickle.load(f)
@@ -121,6 +125,19 @@ def load_checkpoint(path: Path,
                 loss_scale=loss_scale)
 
 
+def setup_logging(log_level: str,
+                  log_to_stdout: bool,
+                  logfile: Optional[Path],
+                  ) -> None:
+    handlers: List[logging.Handler] = []
+    handlers.append(logging.StreamHandler(sys.stdout if log_to_stdout else sys.stderr))
+    if logfile is not None:
+        handlers.append(logging.FileHandler(logfile))
+    logging.basicConfig(level=log_level,
+                        format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s',
+                        handlers=handlers)
+
+
 def get_cli_group(name: str) -> click.Group:
     '''Get a click group with a common set of options.'''
     full_name = f'{NAME} - {name}'
@@ -136,13 +153,7 @@ def get_cli_group(name: str) -> click.Group:
             debug: bool,
             ) -> None:
         '''MiniGPT, a GPT-like language model'''
-        handlers: List[logging.Handler] = []
-        handlers.append(logging.StreamHandler(sys.stdout if log_to_stdout else sys.stderr))
-        if logfile is not None:
-            handlers.append(logging.FileHandler(logfile))
-        logging.basicConfig(level=log_level,
-                            format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s',
-                            handlers=handlers)
+        setup_logging(log_level, log_to_stdout, logfile)
         logger.info(f'Starting {full_name}')
         set_debug(debug)
 

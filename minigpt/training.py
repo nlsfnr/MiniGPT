@@ -6,6 +6,8 @@ from __future__ import annotations
 import csv
 import logging
 import sys
+import time
+import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,7 +41,6 @@ T = TypeVar('T')
 class TrainingConfig(nn.ModelConfig, Protocol):
     '''Configuration for training.'''
     batch_size: int
-    gradient_accumulation_steps: int  # Must divide batch_size
     use_half_precision: bool
     loss_scale_period: Optional[int]
     initial_loss_scale_log2: Optional[int]
@@ -74,6 +75,7 @@ class TelemetryData:
     loss: Array
     losses: Array
     logits: Array
+    time_passed: float
 
 
 def train(config: TrainingConfig,
@@ -91,7 +93,6 @@ def train(config: TrainingConfig,
     train_step_jit = jax.pmap(partial(train_step, config=config, axis_name='device'),
                               axis_name='device',
                               donate_argnums=5)
-    # Helper function for dealing with multiple devices
     device_count = jax.device_count()
     logger.info(f'Devices found: {device_count}.')
     # Broadcast components across devices
@@ -99,12 +100,9 @@ def train(config: TrainingConfig,
     opt_state = broadcast_to_devices(opt_state)
     loss_scale = broadcast_to_devices(loss_scale)
     # Training loop
+    t = time.perf_counter()
     for epoch in count():
         for indices in dataloader:
-            # Note that due to the JAX's asynchronous dispatch, the timing
-            # information is not accurate within one step and should only be
-            # considered across multiple steps.
-            # See: https://jax.readthedocs.io/en/latest/async_dispatch.html
             indices = policy.cast_to_compute(indices)
             # Split indices and RNG betweenn devices
             indices = rearrange(indices, '(d b) ... -> d b ...', d=device_count)
@@ -123,8 +121,10 @@ def train(config: TrainingConfig,
                 loss=jnp.mean(telemetry_dict['loss']),
                 losses=concat_from_devices(telemetry_dict['losses']),
                 logits=concat_from_devices(telemetry_dict['logits']),
-                gradients_finite=concat_from_devices(telemetry_dict['gradients_finite']).all())
+                gradients_finite=telemetry_dict['gradients_finite'].all(),
+                time_passed=time.perf_counter() - t)
             step += 1
+            t = time.perf_counter()
         logger.info(f'Epoch {epoch + 1:,} finished')
 
 
@@ -145,7 +145,7 @@ def train_step(indices: Array,
     grad_fn = jax.grad(loss_hk.apply, has_aux=True)
     optimizer = get_optimizer(config)
     # Execution
-    gradients, telemetry_dict = grad_fn(params, rng, indices)
+    gradients, telemetry_dict = grad_fn(params, rng, indices, loss_scale)
     gradients = jax.lax.pmean(gradients, axis_name=axis_name)
     gradients = loss_scale.unscale(gradients)
     gradients_finite = jmp.all_finite(gradients)
@@ -166,27 +166,19 @@ def train_step(indices: Array,
 
 
 def loss_fn(indices: Array,
+            loss_scale: jmp.LossScale,
             *,
             config: TrainingConfig,
             ) -> Tuple[Array, Dict[str, Any]]:
     model = nn.Model.from_config(config)
-    # Accumulate the loss
-    indices_splits = rearrange(indices, '(o b) ... -> o b ...',
-                               o=config.gradient_accumulation_steps)
-    loss = jnp.zeros((), dtype=jnp.float32)
-    all_logits = []
-    all_losses = []
-    for split in indices_splits:
-        logits = model(split[:, :-1], is_training=True)
-        all_logits.append(logits)
-        one_hot_targets = hk.one_hot(split[:, 1:], logits.shape[-1])
-        losses = optax.softmax_cross_entropy(logits, one_hot_targets)
-        all_losses.append(losses)
-        loss += jnp.mean(losses)
-    loss = loss / len(indices_splits)
-    return loss, dict(logits=jnp.concatenate(all_logits, axis=0),
-                      losses=jnp.concatenate(all_losses, axis=0),
-                      loss=loss)
+    logits = model(indices[:, :-1], is_training=True)
+    one_hot_targets = hk.one_hot(indices[:, 1:], logits.shape[-1])
+    losses = optax.softmax_cross_entropy(logits, one_hot_targets)
+    loss = jnp.mean(losses)
+    scaled_loss = loss_scale.scale(loss)
+    return scaled_loss, dict(logits=logits,
+                             losses=losses,
+                             loss=loss)
 
 
 def get_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
@@ -197,32 +189,34 @@ def get_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
 
 def get_policy(config: TrainingConfig) -> jmp.Policy:
     '''Get and set the policy for mixed precision training.'''
-    policy = jmp.get_policy('params=f32,compute=f16,output=f32'
-                            if config.use_half_precision else
-                            'params=f32,compute=f32,output=f32')
-    hk.mixed_precision.set_policy(nn.Model, policy)
-    ln_policy = jmp.get_policy('params=f32,compute=f32,output=f16'
-                               if config.use_half_precision else
-                               'params=f32,compute=f32,output=f32')
-    hk.mixed_precision.set_policy(hk.LayerNorm, ln_policy)
-    return policy
+    full = jnp.float32
+    half = jnp.float16 if config.use_half_precision else jnp.float32
+    half_policy = jmp.Policy(param_dtype=full,
+                             compute_dtype=half,
+                             output_dtype=full)
+    full_policy = jmp.Policy(param_dtype=full,
+                             compute_dtype=full,
+                             output_dtype=full)
+    hk.mixed_precision.set_policy(nn.Model, half_policy)
+    hk.mixed_precision.set_policy(hk.LayerNorm, full_policy)
+    return half_policy
 
 
 def get_loss_scale(config: TrainingConfig,
                    step: int,
                    ) -> jmp.LossScale:
     '''Get the loss scale for mixed precision training.'''
-    if config.use_half_precision:
-        msg = 'initial_loss_scale_log2 must be set for mixed precision training.'
-        assert config.initial_loss_scale_log2 is not None, msg
-        msg = 'loss_scale_period must be set for mixed precision training.'
-        assert config.loss_scale_period is not None, msg
-        scale = jmp.DynamicLossScale(2. ** jnp.asarray(config.initial_loss_scale_log2),
-                                     counter=jnp.asarray(step % config.loss_scale_period),
-                                     period=config.loss_scale_period)
-    else:
-        scale = jmp.NoOpLossScale()
-    return scale
+    if not config.use_half_precision:
+        return jmp.NoOpLossScale()
+    msg = 'initial_loss_scale_log2 must be set for mixed precision training.'
+    assert config.initial_loss_scale_log2 is not None, msg
+    if config.loss_scale_period is None:
+        return jmp.StaticLossScale(
+            2. ** jnp.asarray(config.initial_loss_scale_log2))
+    return jmp.DynamicLossScale(
+        2. ** jnp.asarray(config.initial_loss_scale_log2),
+        counter=jnp.asarray(step % config.loss_scale_period),
+        period=config.loss_scale_period)
 
 
 def get_learning_rate_schedule(config: TrainingConfig) -> optax.Schedule:
@@ -301,13 +295,20 @@ def autolog(telemetry_iter: Iterator[TelemetryData],
             ) -> Iterator[TelemetryData]:
     '''Log the telemetry data at the specified frequency.'''
     loss_history = []
+    time_history = []
     for telemetry in telemetry_iter:
         loss_history.append(telemetry.loss)
+        time_history.append(telemetry.time_passed)
+        if not telemetry.gradients_finite:
+            logger.warning(f'Non-finite gradients')
         if telemetry.step % frequency == 0 and loss_history:
             mean_loss = jnp.mean(jnp.asarray(loss_history))
+            mean_time = jnp.mean(jnp.asarray(time_history))
             logger.info(f'Step: {telemetry.step:,}'
-                        f' | loss: {mean_loss:.4f}')
+                        f' | loss: {mean_loss:.4f}'
+                        f' | S/step: {mean_time:.4f}')
             loss_history.clear()
+            time_history.clear()
         yield telemetry
 
 
@@ -322,7 +323,7 @@ def log_to_csv(telemetry_iter: Iterator[TelemetryData],
         path.touch()
     with path.open('a') as f:
         writer = csv.DictWriter(f, fieldnames=[
-            'time', 'step', 'epoch', 'loss', 'learning_rate'])
+            'time', 'step', 'epoch', 'loss', 'learning_rate', 'time_passed'])
         if not did_exist:
             writer.writeheader()
         for telemetry in telemetry_iter:
@@ -332,7 +333,8 @@ def log_to_csv(telemetry_iter: Iterator[TelemetryData],
                                  step=telemetry.step,
                                  epoch=telemetry.epoch,
                                  loss=telemetry.loss,
-                                 learning_rate=lr_sched(telemetry.step)))
+                                 learning_rate=lr_sched(telemetry.step),
+                                 time_passed=telemetry.time_passed))
             yield telemetry
 
 
@@ -343,7 +345,6 @@ class Config(common.YamlConfig):
     use_half_precision: bool
     loss_scale_period: Optional[int]
     initial_loss_scale_log2: Optional[int]
-    gradient_accumulation_steps: int  # Must divide batch_size
     peak_learning_rate: float
     end_learning_rate: float
     warmup_steps: int
@@ -371,55 +372,6 @@ class Config(common.YamlConfig):
     num_workers: int
 
 
-def easy_train(config_path: Optional[Path],
-               load_from: Optional[Path],
-               save_path: Optional[Path],
-               save_frequency: int,
-               log_frequency: int,
-               csv_path: Optional[Path],
-               stop_at: Optional[int],
-               seed: Optional[int],
-               ) -> None:
-    '''Train a model.'''
-    if config_path is None and load_from is None:
-        raise ValueError('Either a configuration file or a checkpoint must be provided')
-    if config_path is not None and load_from is not None:
-        raise ValueError('Only one of configuration file or checkpoint must be provided')
-    if config_path is not None:
-        config = Config.from_yaml(config_path)
-        rngs = common.get_rngs(seed)
-        params = nn.Model.get_params(config, next(rngs))
-        opt_state = get_optimizer_state(config, params)
-        step = 0
-        loss_scale = None
-    else:
-        assert load_from is not None
-        checkpoint = common.load_checkpoint(load_from, config_class=Config)
-        config = checkpoint['config']
-        rngs = checkpoint['rngs']
-        params = checkpoint['params']
-        opt_state = checkpoint['opt_state']
-        step = checkpoint['step']
-        loss_scale = checkpoint['loss_scale']
-    dataloader = data.LMDBDataset.from_config(config).get_dataloader_from_config(config)
-    telemetry_iter = train(config=config,
-                           params=params,
-                           opt_state=opt_state,
-                           dataloader=dataloader,
-                           rngs=rngs,
-                           loss_scale=loss_scale,
-                           step=step)
-    if save_path is not None:
-        telemetry_iter = autosave(telemetry_iter, save_frequency, save_path)
-    if csv_path is not None:
-        telemetry_iter = log_to_csv(telemetry_iter, csv_path)
-    telemetry_iter = autolog(telemetry_iter, log_frequency)
-    i = stop_at if stop_at is not None else -1
-    while i != 0:
-        next(telemetry_iter)
-        i -= 1
-
-
 def get_cli() -> click.Group:
     '''Get the command line interface for this module.'''
 
@@ -441,8 +393,53 @@ def get_cli() -> click.Group:
     @click.option('--stop-at', type=int, default=None,
                   help='Stop training after this many steps')
     @click.option('--seed', type=int, default=None, help='Random seed')
-    def cli_easy_train(*args, **kwargs) -> None:
-        easy_train(*args, **kwargs)
+    def cli_train(config_path: Optional[Path],
+                  load_from: Optional[Path],
+                  save_path: Optional[Path],
+                  save_frequency: int,
+                  log_frequency: int,
+                  csv_path: Optional[Path],
+                  stop_at: Optional[int],
+                  seed: Optional[int],
+                  ) -> None:
+        '''Train a model.'''
+        if config_path is None and load_from is None:
+            raise ValueError('Either a configuration file or a checkpoint must be provided')
+        if config_path is not None and load_from is not None:
+            raise ValueError('Only one of configuration file or checkpoint must be provided')
+        if config_path is not None:
+            config = Config.from_yaml(config_path)
+            rngs = common.get_rngs(seed)
+            params = nn.Model.get_params(config, next(rngs))
+            opt_state = get_optimizer_state(config, params)
+            step = 0
+            loss_scale = None
+        else:
+            assert load_from is not None
+            checkpoint = common.load_checkpoint(load_from, config_class=Config)
+            config = checkpoint['config']
+            rngs = checkpoint['rngs']
+            params = checkpoint['params']
+            opt_state = checkpoint['opt_state']
+            step = checkpoint['step']
+            loss_scale = checkpoint['loss_scale']
+        dataloader = data.LMDBDataset.from_config(config).get_dataloader_from_config(config)
+        telemetry_iter = train(config=config,
+                               params=params,
+                               opt_state=opt_state,
+                               dataloader=dataloader,
+                               rngs=rngs,
+                               loss_scale=loss_scale,
+                               step=step)
+        if save_path is not None:
+            telemetry_iter = autosave(telemetry_iter, save_frequency, save_path)
+        if csv_path is not None:
+            telemetry_iter = log_to_csv(telemetry_iter, csv_path)
+        telemetry_iter = autolog(telemetry_iter, log_frequency)
+        i = stop_at if stop_at is not None else -1
+        while i != 0:
+            next(telemetry_iter)
+            i -= 1
 
     return cli
 
