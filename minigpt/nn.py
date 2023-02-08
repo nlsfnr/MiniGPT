@@ -141,7 +141,7 @@ class EncoderBlock(hk.Module):
             The output vectors. Shape: [batch_size, sequence_length, model_size].
         '''
         chex.assert_rank(x, 3)
-        mha_ln = hk.LayerNorm(-1, False, False, name='mha_ln')
+        mha_ln = hk.LayerNorm(-1, True, True, name='mha_ln')
         mha = MultiHeadAttention(self.num_heads,
                                  self.key_size,
                                  self.w_init,
@@ -150,7 +150,7 @@ class EncoderBlock(hk.Module):
                                  self.dropout,
                                  name='mha')
         mlp = hk.Sequential([
-            hk.LayerNorm(-1, False, False, name='mlp_ln'),
+            hk.LayerNorm(-1, True, True, name='mlp_ln'),
             hk.Linear(self.mlp_size, w_init=self.w_init, name='mlp_1'),
             jax.nn.gelu,
             hk.Linear(self.model_size, w_init=self.w_init, name='mlp_2'),
@@ -357,8 +357,11 @@ class Model(hk.Module):
                     model_size=self.model_size,
                     dropout=self.dropout,
                     name='encoder')(x, is_training)
-        x = hk.LayerNorm(-1, False, False, name='layer_norm')(x)
-        logits = hk.Linear(self.vocab_size, w_init=self.embed_init, name='logits')(x)
+        x = hk.LayerNorm(-1, True, True, name='layer_norm')(x)
+        logits = hk.Linear(self.vocab_size,
+                           w_init=self.embed_init,
+                           with_bias=False,
+                           name='logits')(x)
         return logits
 
     @classmethod

@@ -14,6 +14,7 @@ import click
 import datasets
 import lmdb
 import numpy as np
+import tokenizers
 import tokenizers.processors
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -315,7 +316,7 @@ def get_cli() -> click.Group:
     @click.option('--path', '-p', type=Path, required=True, help='Where to save the dataset')
     @click.option('--name', '-n', type=str, required=True, help='Dataset name')
     @click.option('--min-length', '-l', type=int, default=0, help='Minimum length of a sample')
-    @click.option('--min-chars-per-token', '-c', type=int, default=0.0,
+    @click.option('--min-chars-per-token', '-c', type=float, default=0.0,
                   help='Maximum number of characters per token')
     def cli_new_dataset(path: Path,
                         name: str,
