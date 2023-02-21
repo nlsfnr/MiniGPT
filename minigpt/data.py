@@ -14,7 +14,6 @@ import click
 import datasets
 import lmdb
 import numpy as np
-import tokenizers
 import tokenizers.processors
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -28,7 +27,6 @@ if __name__ == '__main__':
     sys.path.append('.')
 
 from minigpt import common
-
 
 LMDB_MAP_SIZE = 1 << 40
 UNK_TOKEN = '[UNK]'
@@ -176,7 +174,7 @@ def chars_per_token_filter(samples: Iterator[Dict[str, Any]],
     '''Filters out samples that have too few characters per token. Similar to
     the compression score from https://arxiv.org/abs/2212.14034'''
     if tokenizer is None:
-        tokenizer = tokenizers.Tokenizer.from_pretrained("bert-base-uncased")  # type: ignore
+        tokenizer = Tokenizer.from_pretrained("bert-base-uncased")  # type: ignore
         assert isinstance(tokenizer, Tokenizer)
     else:
         tokenizer = get_tokenizer(tokenizer)
@@ -229,7 +227,7 @@ def new_tokenizer(samples_or_db_path: Union[Iterator[Dict[str, Any]], Path],
                   vocab_size: int = 1 << 15,
                   min_frequency: int = 10,
                   tokenizer_kind: str = 'sentencepiece',
-                  ) -> tokenizers.Tokenizer:
+                  ) -> Tokenizer:
     '''Create a new tokenizer from a stream of samples.'''
     # Resolce the samples
     if isinstance(samples_or_db_path, Path):
@@ -257,7 +255,7 @@ def new_tokenizer(samples_or_db_path: Union[Iterator[Dict[str, Any]], Path],
 
 def save_tokenizer(tokenizer: TokenizerLike,
                    path: Path,
-                   ) -> tokenizers.Tokenizer:
+                   ) -> Tokenizer:
     tokenizer = get_tokenizer(tokenizer)
     path.parent.mkdir(parents=True, exist_ok=True)
     tokenizer.save(str(path))

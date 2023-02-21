@@ -60,10 +60,10 @@ def generate(rng: chex.PRNGKey,
             next_index = jnp.argmax(logits + noise, -1)
             indices.append(int(next_index))
             yield str(tokenizer.id_to_token(next_index)), str(tokenizer.decode(indices))
-            if next_index == tokenizer.token_to_id(data.EOS_TOKEN):
+            if next_index == eos_index:
                 break
             if len(indices) > config.max_sequence_length:
-                break
+                indices.pop(0)
 
 
 def get_cli() -> click.Group:
@@ -76,6 +76,7 @@ def get_cli() -> click.Group:
 
         # Model config
         vocab_size: int
+        embedding_size: int
         max_sequence_length: int
         num_layers: int
         num_heads: int
@@ -110,8 +111,9 @@ def get_cli() -> click.Group:
                           config=config,
                           prompt=prompt,
                           energy=energy)
-        for _, text in tokens:
-            print(text)
+        print(prompt, end='')
+        for token, _ in tokens:
+            print(token, end='', flush=True)
 
     return cli
 

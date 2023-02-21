@@ -7,7 +7,6 @@ import csv
 import logging
 import sys
 import time
-import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -300,7 +299,7 @@ def autolog(telemetry_iter: Iterator[TelemetryData],
         loss_history.append(telemetry.loss)
         time_history.append(telemetry.time_passed)
         if not telemetry.gradients_finite:
-            logger.warning(f'Non-finite gradients')
+            logger.warning('Non-finite gradients')
         if telemetry.step % frequency == 0 and loss_history:
             mean_loss = jnp.mean(jnp.asarray(loss_history))
             mean_time = jnp.mean(jnp.asarray(time_history))
@@ -353,6 +352,7 @@ class Config(common.YamlConfig):
 
     # Model config
     vocab_size: int
+    embedding_size: int
     max_sequence_length: int
     num_layers: int
     num_heads: int

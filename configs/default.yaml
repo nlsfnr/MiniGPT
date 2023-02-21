@@ -1,4 +1,4 @@
-batch_size: 64
+batch_size: 256
 use_half_precision: true
 loss_scale_period: 500
 initial_loss_scale_log2: 15
@@ -9,21 +9,22 @@ total_steps: 10000
 weight_decay: 0.01
 
 # Model config
-vocab_size: 30000
+vocab_size: 4096
+embedding_size: 64
 max_sequence_length: 32
 num_layers: 4
-num_heads: 8
+num_heads: 6
 key_size: 32
 value_size: 32
 w_init_var: 0.02
 embed_init_var: 0.02
-mlp_size: 256
-model_size: 64
+mlp_size: 512
+model_size: 128
 dropout: 0.1
 
 # Data config
 dataset_path: ./data/wikitext/
-tokenizer_path: ./tokenizers/wikitext-30k
+tokenizer_path: ./tokenizers/wikitext-4k
 
 # DataLoader config
 num_workers: 6

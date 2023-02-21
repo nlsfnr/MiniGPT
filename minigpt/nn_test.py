@@ -21,15 +21,15 @@ def test_nolo_multihead_attention_call() -> None:
     assert y.shape == (2, 3, 5)
 
 
-def test_nolo_encoder_block_call() -> None:
+def test_nolo_decoder_block_call() -> None:
     rngs = hk.PRNGSequence(42)
-    model = lambda x: nn.EncoderBlock(
+    model = lambda x: nn.DecoderBlock(
         num_heads=2,
         w_init=hk.initializers.TruncatedNormal(stddev=0.02),
         key_size=4,
         value_size=4,
         model_size=5,
-        name='nolo_encoder_block')(x, True)
+        name='nolo_decoder_block')(x, True)
     model_hk = hk.transform(model)
     x = jnp.ones((2, 3, 5))
     params = model_hk.init(next(rngs), x)
@@ -37,16 +37,16 @@ def test_nolo_encoder_block_call() -> None:
     assert y.shape == (2, 3, 5)
 
 
-def test_nolo_encoder_call() -> None:
+def test_nolo_decoder_call() -> None:
     rngs = hk.PRNGSequence(42)
-    model = lambda x: nn.Encoder(
+    model = lambda x: nn.Decoder(
         num_layers=2,
         num_heads=2,
         w_init=hk.initializers.TruncatedNormal(stddev=0.02),
         key_size=4,
         value_size=4,
         model_size=5,
-        name='nolo_encoder')(x, True)
+        name='nolo_decoder')(x, True)
     model_hk = hk.transform(model)
     x = jnp.ones((2, 3, 5))
     params = model_hk.init(next(rngs), x)
@@ -58,6 +58,7 @@ def test_nolo_model_call() -> None:
     rngs = hk.PRNGSequence(42)
     model = lambda x: nn.Model(
         vocab_size=10,
+        embedding_size=5,
         max_sequence_length=3,
         num_layers=2,
         num_heads=2,

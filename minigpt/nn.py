@@ -94,7 +94,7 @@ class MultiHeadAttention(hk.Module):
         return o_proj(y)  # B L M
 
 
-class EncoderBlock(hk.Module):
+class DecoderBlock(hk.Module):
 
     def __init__(self,
                  num_heads: int,
@@ -131,7 +131,7 @@ class EncoderBlock(hk.Module):
                  x: Array,  # B L V
                  is_training: bool,
                  ) -> Array:
-        '''Compute the output of a transformer encoder block with pre-norm.
+        '''Compute the output of a transformer decoder block with pre-norm.
 
         Args:
             x: Input vectors. Shape: [batch_size, sequence_length, model_size].
@@ -165,7 +165,7 @@ class EncoderBlock(hk.Module):
         return y + z
 
 
-class Encoder(hk.Module):
+class Decoder(hk.Module):
 
     def __init__(self,
                  num_layers: int,
@@ -185,9 +185,11 @@ class Encoder(hk.Module):
             num_heads: Number of attention heads.
             key_size: Size of the keys and queries for each attention head.
             w_init: Initializer for the attention weights.
+            mlp_size: Size of the MLP hidden layer. If None, use four times the model size.
             value_size: Size of the value vectors. If None, use the key size.
             model_size: Size of the model. If None, use the key size multiplied
                 by the number of heads.
+            dropout: Dropout rate.
             name: Name of the module.
         '''
         super().__init__(name=name)
@@ -204,7 +206,7 @@ class Encoder(hk.Module):
                  x: Array,  # B L V
                  is_training: bool,
                  ) -> Array:
-        '''Compute the output of a transformer encoder stack.
+        '''Compute the output of a transformer decoder stack.
 
         Args:
             x: Input vectors. Shape: [batch_size, sequence_length, model_size].
@@ -215,7 +217,7 @@ class Encoder(hk.Module):
         '''
         chex.assert_rank(x, 3)
         for i in range(self.num_layers):
-            x = EncoderBlock(num_heads=self.num_heads,
+            x = DecoderBlock(num_heads=self.num_heads,
                              key_size=self.key_size,
                              w_init=self.w_init,
                              mlp_size=self.mlp_size,
@@ -226,27 +228,9 @@ class Encoder(hk.Module):
         return x
 
 
-class LearnedPositionalEncoding(hk.Module):
-
-    def __init__(self,
-                 max_sequence_length: int,
-                 dim: int,
-                 name: Optional[str] = None,
-                 ) -> None:
-        super().__init__(name=name)
-        self.max_sequence_length = max_sequence_length
-        self.dim = dim
-
-    def __call__(self,
-                 x: Array,
-                 ) -> Array:
-        pos_emb = hk.get_parameter('pos_emb', [self.max_sequence_length, self.dim], x.dtype,
-                                   init=hk.initializers.RandomNormal(stddev=0.02))
-        return x + pos_emb[None, :x.shape[1], :]
-
-
 class ModelConfig(Protocol):
     vocab_size: int
+    embedding_size: int
     max_sequence_length: int
     num_layers: int
     num_heads: int
@@ -272,6 +256,7 @@ class Model(hk.Module):
 
     def __init__(self,
                  vocab_size: int,
+                 embedding_size: int,
                  max_sequence_length: int,
                  num_layers: int,
                  num_heads: int,
@@ -288,8 +273,9 @@ class Model(hk.Module):
 
         Args:
             vocab_size: Size of the vocabulary.
+            embedding_size: Size of the token embeddings.
             max_sequence_length: Maximum sequence length.
-            num_layers: Number of stacked encoder blocks.
+            num_layers: Number of stacked decoder blocks.
             num_heads: Number of attention heads.
             key_size: Size of the keys and queries for each attention head.
             w_init: Initializer for the attention weights.
@@ -298,10 +284,12 @@ class Model(hk.Module):
             value_size: Size of the value vectors. If None, use the key size.
             model_size: Size of the model. If None, use the key size multiplied
                 by the number of heads.
+            dropout: Dropout rate.
             name: Name of the module.
         '''
         super().__init__(name=name)
         self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
         self.max_sequence_length = max_sequence_length
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -318,6 +306,7 @@ class Model(hk.Module):
                     config: ModelConfig,
                     ) -> Model:
         return cls(vocab_size=config.vocab_size,
+                   embedding_size=config.embedding_size,
                    max_sequence_length=config.max_sequence_length,
                    num_layers=config.num_layers,
                    num_heads=config.num_heads,
@@ -332,7 +321,7 @@ class Model(hk.Module):
                  indices: Array,
                  is_training: bool,
                  ) -> Array:
-        '''Compute the output of a transformer encoder stack.
+        '''Compute the output of a transformer decoder stack.
 
         Args:
             indices: Input indices. Shape: [batch_size, sequence_length].
@@ -342,13 +331,19 @@ class Model(hk.Module):
             The output vectors. Shape: [batch_size, sequence_length, model_size].
         '''
         chex.assert_rank(indices, 2)
-        x = hk.Embed(self.vocab_size,
-                     self.model_size,
-                     w_init=self.embed_init,
-                     name='embedding')(indices)
-        x = LearnedPositionalEncoding(self.max_sequence_length,
-                                      self.model_size)(x)
-        x = Encoder(num_layers=self.num_layers,
+        wte = hk.Embed(self.vocab_size,
+                       self.embedding_size,
+                       w_init=self.embed_init,
+                       name='embedding')
+        pte = hk.Embed(self.max_sequence_length,
+                       self.embedding_size,
+                       w_init=self.embed_init,
+                       name='positional_embedding')
+        x = wte(indices) + pte(jnp.arange(indices.shape[1])[None, :])
+        x = hk.Linear(self.model_size,
+                      with_bias=False,
+                      name='emb_to_model')(x)
+        x = Decoder(num_layers=self.num_layers,
                     num_heads=self.num_heads,
                     key_size=self.key_size,
                     value_size=self.value_size,
@@ -356,12 +351,12 @@ class Model(hk.Module):
                     mlp_size=self.mlp_size,
                     model_size=self.model_size,
                     dropout=self.dropout,
-                    name='encoder')(x, is_training)
+                    name='decoder')(x, is_training)
         x = hk.LayerNorm(-1, True, True, name='layer_norm')(x)
-        logits = hk.Linear(self.vocab_size,
-                           w_init=self.embed_init,
-                           with_bias=False,
-                           name='logits')(x)
+        x = hk.Linear(self.embedding_size,
+                      with_bias=False,
+                      name='model_to_emb')(x)
+        logits = x @ wte.embeddings.T
         return logits
 
     @classmethod
