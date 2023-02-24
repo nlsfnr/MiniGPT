@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import sys
+import time
 from itertools import islice, tee
-from multiprocessing import cpu_count
 from pathlib import Path
 from typing import (Any, Dict, Iterable, Iterator, List, Optional, Protocol,
                     Tuple, TypeVar, Union)
@@ -400,7 +399,6 @@ def get_cli() -> click.Group:
             next(it)
         t1 = time.time()
         logger.info(f'Estimated performance: {num_samples / (t1 - t0):.2f} samples/s')
-
 
     @cli.command('n-tokens')
     @click.option('--db-path', '-d', type=Path, required=True,
