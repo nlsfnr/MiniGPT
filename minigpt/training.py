@@ -48,6 +48,7 @@ class TrainingConfig(nn.ModelConfig, Protocol):
     warmup_steps: int
     total_steps: Optional[int]
     weight_decay: float
+    yield_freq: int
 
     @classmethod
     @abstractmethod
@@ -69,11 +70,8 @@ class TelemetryData:
     loss_scale: jmp.LossScale
     config: TrainingConfig
     rngs: hk.PRNGSequence
-    gradients: ArrayTree
     gradients_finite: bool
     loss: Array
-    losses: Array
-    logits: Array
     time_passed: float
 
 
@@ -108,20 +106,18 @@ def train(config: TrainingConfig,
             rng = jax.random.split(next(rngs), num=device_count)
             params, opt_state, loss_scale, telemetry_dict = train_step_jit(
                 indices, params, opt_state, loss_scale, rng)
-            yield TelemetryData(
-                step=step,
-                epoch=epoch,
-                params=get_from_first_device(params),
-                opt_state=get_from_first_device(opt_state),
-                loss_scale=get_from_first_device(loss_scale),
-                config=config,
-                rngs=rngs,
-                gradients=get_from_first_device(telemetry_dict['gradients']),
-                loss=jnp.mean(telemetry_dict['loss']),
-                losses=concat_from_devices(telemetry_dict['losses']),
-                logits=concat_from_devices(telemetry_dict['logits']),
-                gradients_finite=telemetry_dict['gradients_finite'].all(),
-                time_passed=time.perf_counter() - t)
+            if step % config.yield_freq == 0:
+                yield TelemetryData(
+                    step=step,
+                    epoch=epoch,
+                    params=get_from_first_device(params),
+                    opt_state=get_from_first_device(opt_state),
+                    loss_scale=get_from_first_device(loss_scale),
+                    config=config,
+                    rngs=rngs,
+                    loss=jnp.mean(telemetry_dict['loss']),
+                    gradients_finite=telemetry_dict['gradients_finite'].all(),
+                    time_passed=time.perf_counter() - t)
             step += 1
             t = time.perf_counter()
         logger.info(f'Epoch {epoch + 1:,} finished')
@@ -160,7 +156,6 @@ def train_step(indices: Array,
             opt_state,
             loss_scale,
             dict(telemetry_dict,
-                 gradients=gradients,
                  gradients_finite=gradients_finite))
 
 
@@ -349,6 +344,7 @@ class Config(common.YamlConfig):
     warmup_steps: int
     total_steps: Optional[int]
     weight_decay: float
+    yield_freq: int
 
     # Model config
     vocab_size: int

@@ -7,6 +7,7 @@ end_learning_rate: 0.0001
 warmup_steps: 100
 total_steps: 10000
 weight_decay: 0.01
+yield_freq: 10
 
 # Model config
 vocab_size: 4096
