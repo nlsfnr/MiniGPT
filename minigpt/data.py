@@ -146,6 +146,8 @@ def load_hf_dataset(name: str,
         dataset = datasets.load_dataset('imdb', split='unsupervised')
     elif name == 'wikitext':
         dataset = datasets.load_dataset('wikitext', 'wikitext-103-raw-v1', split='train')
+    elif name == 'c4':
+        dataset = datasets.load_dataset('c4', 'en', split='train')
     elif name == 'dummy':
         dataset = [dict(text='Hello world!')] * 5
     else:

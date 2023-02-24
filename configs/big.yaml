@@ -1,0 +1,31 @@
+batch_size: 512
+use_half_precision: true
+loss_scale_period: 2000
+initial_loss_scale_log2: 15
+peak_learning_rate: 0.0006
+end_learning_rate: 0.00006
+warmup_steps: 1000
+total_steps: 100000
+weight_decay: 0.01
+yield_freq: 10
+
+# Model config
+vocab_size: 32768
+embedding_size: 512
+max_sequence_length: 64
+num_layers: 8
+num_heads: 8
+key_size: 64
+value_size: 64
+w_init_var: 0.02
+embed_init_var: 0.02
+mlp_size: 2048
+model_size: 512
+dropout: 0.0
+
+# Data config
+dataset_path: ./data/c4/
+tokenizer_path: ./tokenizers/c4-32k
+
+# DataLoader config
+num_workers: 12
