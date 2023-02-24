@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import sys
 from itertools import islice, tee
 from multiprocessing import cpu_count
@@ -96,11 +97,13 @@ class LMDBDataset(Dataset):
                                    additional_sequence_length: int = 0,
                                    ) -> DataLoader:
         return self.get_dataloader(config.batch_size,
-                                   config.max_sequence_length + additional_sequence_length)
+                                   config.max_sequence_length + additional_sequence_length,
+                                   config.num_workers)
 
     def get_dataloader(self,
                        batch_size: int,
                        sequence_length: int,
+                       num_workers: int,
                        ) -> DataLoader:
         self.tokenizer.enable_truncation(sequence_length)
         self.tokenizer.enable_padding(pad_id=self.tokenizer.token_to_id(PAD_TOKEN),
@@ -116,7 +119,7 @@ class LMDBDataset(Dataset):
                           pin_memory=True,
                           drop_last=True,
                           shuffle=True,
-                          num_workers=cpu_count() // 2)
+                          num_workers=num_workers)
 
 
 def get_dataset(d: DatasetLike, t: TokenizerLike) -> LMDBDataset:
@@ -289,20 +292,22 @@ def store_samples(samples: Iterator[Dict[str, Any]],
 def get_n_tokens(db_like: DatasetLike,
                  tokenizer_like: TokenizerLike,
                  max_samples: Optional[int] = None,
-                 ) -> Tuple[int, float]:
+                 ) -> Tuple[int, float, float]:
     '''Get the number of tokens in a dataset. To avoid tokenizing the entire
     dataset only max_sampes are tokenzied and the total number of tokens in the
     dataset are extrapolated from there. Returns the estimated number of tokens
     and the variance of tokens pers sample across the tokenized samples.'''
     tokenizer = get_tokenizer(tokenizer_like)
     ds = get_dataset(db_like, tokenizer)
-    keys = (ds.keys
-            if max_samples is None else
-            np.random.permutation(ds.keys)[:max_samples])
+    indices = np.random.permutation(np.arange(len(ds)))[:max_samples if max_samples else len(ds)]
     n_tokens = []
-    for key in keys:
-        n_tokens.append(len(ds[key]['input_ids']))
-    return int(sum(n_tokens) * len(ds) / len(keys)), float(np.var(n_tokens))
+    for index in tqdm(indices):
+        text = ds[index]['text']
+        tokens = tokenizer.encode(text).ids
+        n_tokens.append(len(tokens))
+    return (int(sum(n_tokens) * len(ds) / len(indices)),
+            float(np.mean(n_tokens)),
+            float(np.var(n_tokens)))
 
 
 def get_cli() -> click.Group:
@@ -362,9 +367,62 @@ def get_cli() -> click.Group:
         save_tokenizer(tokenizer, path)
         logger.info('Done')
 
-    return cli
+    @cli.command('perf')
+    @click.option('--db-path', '-d', type=Path, required=True,
+                  help='Path to the database')
+    @click.option('--tokenizer-path', '-t', type=Path, required=True,
+                  help='Path to the tokenizer')
+    @click.option('--batch-size', '-b', type=int, default=1,
+                  help='Batch size')
+    @click.option('--sequence-length', '-s', type=int, default=32,
+                  help='Sequence length')
+    @click.option('--num-workers', '-n', type=int, default=3,
+                  help='Number of workers')
+    @click.option('--num-samples', '-s', type=int, default=1000,
+                  help='Number of samples to use for performance estimation')
+    def cli_perf(db_path: Path,
+                 tokenizer_path: Path,
+                 batch_size: int,
+                 sequence_length: int,
+                 num_workers: int,
+                 num_samples: int,
+                 ) -> None:
+        '''Estimate the performance of a tokenizer.'''
+        logger.info(f'Estimating the performance of {tokenizer_path} on {db_path}')
+        tokenizer = get_tokenizer(tokenizer_path)
+        ds = get_dataset(db_path, tokenizer)
+        dl = ds.get_dataloader(batch_size=batch_size,
+                               sequence_length=sequence_length,
+                               num_workers=num_workers)
+        t0 = time.time()
+        it = iter(dl)
+        for _ in tqdm(range(num_samples)):
+            next(it)
+        t1 = time.time()
+        logger.info(f'Estimated performance: {num_samples / (t1 - t0):.2f} samples/s')
 
-    # TODO: Add CLI endpoint for n_token estimation
+
+    @cli.command('n-tokens')
+    @click.option('--db-path', '-d', type=Path, required=True,
+                  help='Path to the database')
+    @click.option('--tokenizer-path', '-t', type=Path, required=True,
+                  help='Path to the tokenizer')
+    @click.option('--max-samples', '-m', type=int, default=None,
+                  help='Maximum number of samples to use for estimation')
+    def cli_n_tokens(db_path: Path,
+                     tokenizer_path: Path,
+                     max_samples: Optional[int],
+                     ) -> None:
+        '''Estimate the number of tokens in a dataset.'''
+        logger.info(f'Estimating the number of tokens in {db_path}')
+        tokenizer = get_tokenizer(tokenizer_path)
+        ds = get_dataset(db_path, tokenizer)
+        n_tokens, mean, var = get_n_tokens(ds, tokenizer, max_samples)
+        logger.info(f'Estimated number of tokens: {n_tokens / 1e6:.2f}M'
+                    f' (mean: {mean:.2f}'
+                    f', variance: {var:.2f})')
+
+    return cli
 
 
 if __name__ == '__main__':
