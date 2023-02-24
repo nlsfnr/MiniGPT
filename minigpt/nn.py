@@ -141,7 +141,7 @@ class DecoderBlock(hk.Module):
             The output vectors. Shape: [batch_size, sequence_length, model_size].
         '''
         chex.assert_rank(x, 3)
-        mha_ln = hk.LayerNorm(-1, True, True, name='mha_ln')
+        mha_ln = hk.LayerNorm(-1, True, False, name='mha_ln')
         mha = MultiHeadAttention(self.num_heads,
                                  self.key_size,
                                  self.w_init,
@@ -150,7 +150,7 @@ class DecoderBlock(hk.Module):
                                  self.dropout,
                                  name='mha')
         mlp = hk.Sequential([
-            hk.LayerNorm(-1, True, True, name='mlp_ln'),
+            hk.LayerNorm(-1, True, False, name='mlp_ln'),
             hk.Linear(self.mlp_size, w_init=self.w_init, name='mlp_1'),
             jax.nn.gelu,
             hk.Linear(self.model_size, w_init=self.w_init, name='mlp_2'),
@@ -340,9 +340,10 @@ class Model(hk.Module):
                        w_init=self.embed_init,
                        name='positional_embedding')
         x = wte(indices) + pte(jnp.arange(indices.shape[1])[None, :])
-        x = hk.Linear(self.model_size,
-                      with_bias=False,
-                      name='emb_to_model')(x)
+        if self.model_size != self.embedding_size:
+            x = hk.Linear(self.model_size,
+                          with_bias=False,
+                          name='emb_to_model')(x)
         x = Decoder(num_layers=self.num_layers,
                     num_heads=self.num_heads,
                     key_size=self.key_size,
@@ -352,7 +353,7 @@ class Model(hk.Module):
                     model_size=self.model_size,
                     dropout=self.dropout,
                     name='decoder')(x, is_training)
-        x = hk.LayerNorm(-1, True, True, name='layer_norm')(x)
+        x = hk.LayerNorm(-1, True, False, name='layer_norm')(x)
         x = hk.Linear(self.embedding_size,
                       with_bias=False,
                       name='model_to_emb')(x)
