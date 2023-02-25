@@ -13,8 +13,8 @@ from datetime import datetime
 from functools import partial
 from itertools import count
 from pathlib import Path
-from typing import (Any, Dict, Iterator, Optional, Protocol, Tuple, Type,
-                    TypeVar)
+from typing import (Any, Dict, Iterable, Iterator, List, Optional, Protocol,
+                    Tuple, Type, TypeVar)
 
 import click
 import haiku as hk
@@ -78,7 +78,7 @@ class TelemetryData:
 def train(config: TrainingConfig,
           params: ArrayTree,
           opt_state: optax.OptState,
-          dataloader: data.DataLoader,
+          batches: Iterable[Array],
           rngs: hk.PRNGSequence,
           loss_scale: Optional[jmp.LossScale] = None,
           step: int = 0,
@@ -99,7 +99,7 @@ def train(config: TrainingConfig,
     # Training loop
     t = time.perf_counter()
     for epoch in count():
-        for indices in dataloader:
+        for indices in batches:
             indices = policy.cast_to_compute(indices)
             # Split indices and RNG betweenn devices
             indices = rearrange(indices, '(d b) ... -> d b ...', d=device_count)
@@ -361,8 +361,13 @@ class Config(common.YamlConfig):
     dropout: float = 0.1
 
     # Data config
-    dataset_path: Path
+    datasets: List[str]
+    dataset_weights: List[float]
     tokenizer_path: Path
+    tokenizer_kind: str
+    min_frequency: int
+    min_length: int
+    shuffle_buffer_size: int
 
     # DataLoader config
     num_workers: int
@@ -419,11 +424,11 @@ def get_cli() -> click.Group:
             opt_state = checkpoint['opt_state']
             step = checkpoint['step']
             loss_scale = checkpoint['loss_scale']
-        dataloader = data.LMDBDataset.from_config(config).get_dataloader_from_config(config)
+        batches = data.get_batches(config)
         telemetry_iter = train(config=config,
                                params=params,
                                opt_state=opt_state,
-                               dataloader=dataloader,
+                               batches=(jnp.asarray(batch) for batch in batches),
                                rngs=rngs,
                                loss_scale=loss_scale,
                                step=step)
