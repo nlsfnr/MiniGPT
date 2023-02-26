@@ -22,11 +22,11 @@ embed_init_var: 0.02
 mlp_size: 2048
 model_size: 512
 dropout: 0.0
+use_rotary_embedding: true
 
 # Data config
-# Data config
-datasets: ['imdb', 'wikitext', 'c4']
-dataset_weights: [1, 10, 20]
+datasets: ['imdb', 'wikitext', 'c4', 'bookcorpus']
+dataset_weights: [0.1, 1, 20, 5]
 min_frequency: 100
 min_length: 96
 shuffle_buffer_size: 5000
