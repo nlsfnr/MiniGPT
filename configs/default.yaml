@@ -22,6 +22,7 @@ embed_init_var: 0.02
 mlp_size: 512
 model_size: 128
 dropout: 0.1
+use_rotary_embedding: true
 
 # Data config
 dataset_path: ./data/wikitext/

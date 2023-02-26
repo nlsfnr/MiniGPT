@@ -12,7 +12,7 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 from chex import Array
-from einops import rearrange
+from einops import rearrange, repeat
 
 from . import common
 
@@ -20,6 +20,26 @@ logger = logging.getLogger(common.NAME)
 
 
 T = TypeVar('T')
+
+
+def rotary_pos_emb(x: Array,  # B H S D
+                   ) -> Array:
+        dim = x.shape[-1]
+        seq = x.shape[-2]
+        # Near eq. 15 in https://arxiv.org/abs/2104.09864, equivalent to those
+        # in https://arxiv.org/abs/1706.03762
+        ts = jnp.arange(0, dim, 2, dtype=jnp.float32)
+        inv_freqs = 10_000 ** (-ts / dim)
+        grid = jnp.einsum('s, d -> s d', jnp.arange(seq), inv_freqs)
+        # Eq. 34 in https://arxiv.org/abs/2104.09864
+        sin_embs = repeat(jnp.sin(grid), 's d -> 1 s (d 2)')
+        cos_embs = repeat(jnp.cos(grid), 's d -> 1 s (d 2)')
+        # Pairwise swap with alternating signs
+        x1, x2 = x[..., ::2], x[..., 1::2]  # [x1, x3, x5, ...], [x2, x4, x6, ...]
+        x1x2 = jnp.stack([-x2, x1], axis=-1)  # [[-x2, x1], [-x4, x3], ...]
+        xs = rearrange(x1x2, '... d two -> ... (d two)', two=2)  # [-x2, x1, -x4, x3, ...]
+        out = x * cos_embs + xs * sin_embs
+        return out
 
 
 class MultiHeadAttention(hk.Module):
@@ -31,19 +51,9 @@ class MultiHeadAttention(hk.Module):
                  value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
+                 use_rotary_embedding: bool = False,
                  name: Optional[str] = None,
                  ) -> None:
-        '''Initialize the module.
-
-        Args:
-            num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
-            w_init: Initializer for the attention weights.
-            value_size: Size of the value vectors. If None, use the key size.
-            model_size: Size of the model. If None, use the key size multiplied
-                by the number of heads.
-            name: Name of the module.
-        '''
         super().__init__(name=name)
         self.num_heads = num_heads
         self.key_size = key_size
@@ -51,22 +61,12 @@ class MultiHeadAttention(hk.Module):
         self.value_size = value_size or key_size
         self.model_size = model_size or key_size * num_heads
         self.dropout = dropout
+        self.use_rotary_embedding = use_rotary_embedding
 
     def __call__(self,
                  x: Array,  # B L V
                  is_training: bool,
                  ) -> Array:
-        '''Compute multi-head attention.
-
-        Args:
-            query: Query vectors. Shape: [batch_size, query_length, key_size].
-            key: Key vectors. Shape: [batch_size, key_length, key_size].
-            value: Value vectors. Shape: [batch_size, key_length, value_size].
-            is_training: Whether the model is in training mode.
-
-        Returns:
-            The attention output. Shape: [batch_size, query_length, model_size].
-        '''
         chex.assert_rank(x, 3)
         # Projections
         projection = partial(hk.Linear, w_init=self.w_init, with_bias=False)
@@ -81,6 +81,9 @@ class MultiHeadAttention(hk.Module):
         k = rearrange(k, 'b l (h k) -> b h l k', h=self.num_heads)
         v = v_proj(x)  # B L H V
         v = rearrange(v, 'b l (h v) -> b h l v', h=self.num_heads)
+        if self.use_rotary_embedding:
+            q = rotary_pos_emb(q)
+            k = rotary_pos_emb(k)
         # Attention weights
         l: Array = jnp.einsum('b h i k, b h j k -> b h i j', q, k)  # B H L L
         mask = jnp.tril(jnp.ones_like(l))
@@ -104,20 +107,9 @@ class DecoderBlock(hk.Module):
                  value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
+                 use_rotary_embedding: bool = False,
                  name: Optional[str] = None,
                  ) -> None:
-        '''Initialize the module.
-
-        Args:
-            num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
-            w_init: Initializer for the attention weights.
-            mlp_size: Size of the MLP hidden layer. If None, use four times the model size.
-            value_size: Size of the value vectors. If None, use the key size.
-            model_size: Size of the model. If None, use the key size multiplied
-                by the number of heads.
-            name: Name of the module.
-        '''
         super().__init__(name=name)
         self.num_heads = num_heads
         self.key_size = key_size
@@ -126,20 +118,12 @@ class DecoderBlock(hk.Module):
         self.value_size = value_size or key_size
         self.model_size = model_size or key_size * num_heads
         self.dropout = dropout
+        self.use_rotary_embedding = use_rotary_embedding
 
     def __call__(self,
                  x: Array,  # B L V
                  is_training: bool,
                  ) -> Array:
-        '''Compute the output of a transformer decoder block with pre-norm.
-
-        Args:
-            x: Input vectors. Shape: [batch_size, sequence_length, model_size].
-            is_training: Whether the model is in training mode.
-
-        Returns:
-            The output vectors. Shape: [batch_size, sequence_length, model_size].
-        '''
         chex.assert_rank(x, 3)
         mha_ln = hk.LayerNorm(-1, True, False, name='mha_ln')
         mha = MultiHeadAttention(self.num_heads,
@@ -148,6 +132,7 @@ class DecoderBlock(hk.Module):
                                  self.value_size,
                                  self.model_size,
                                  self.dropout,
+                                 self.use_rotary_embedding,
                                  name='mha')
         mlp = hk.Sequential([
             hk.LayerNorm(-1, True, False, name='mlp_ln'),
@@ -176,22 +161,9 @@ class Decoder(hk.Module):
                  value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
+                 use_rotary_embedding: bool = False,
                  name: Optional[str] = None,
                  ) -> None:
-        '''Initialize the module.
-
-        Args:
-            num_layers: Number of layers.
-            num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
-            w_init: Initializer for the attention weights.
-            mlp_size: Size of the MLP hidden layer. If None, use four times the model size.
-            value_size: Size of the value vectors. If None, use the key size.
-            model_size: Size of the model. If None, use the key size multiplied
-                by the number of heads.
-            dropout: Dropout rate.
-            name: Name of the module.
-        '''
         super().__init__(name=name)
         self.num_layers = num_layers
         self.num_heads = num_heads
@@ -201,20 +173,12 @@ class Decoder(hk.Module):
         self.value_size = value_size or key_size
         self.model_size = model_size or key_size * num_heads
         self.dropout = dropout
+        self.use_rotary_embedding = use_rotary_embedding
 
     def __call__(self,
                  x: Array,  # B L V
                  is_training: bool,
                  ) -> Array:
-        '''Compute the output of a transformer decoder stack.
-
-        Args:
-            x: Input vectors. Shape: [batch_size, sequence_length, model_size].
-            is_training: Whether the model is in training mode.
-
-        Returns:
-            The output vectors. Shape: [batch_size, sequence_length, model_size].
-        '''
         chex.assert_rank(x, 3)
         for i in range(self.num_layers):
             x = DecoderBlock(num_heads=self.num_heads,
@@ -224,6 +188,7 @@ class Decoder(hk.Module):
                              value_size=self.value_size,
                              model_size=self.model_size,
                              dropout=self.dropout,
+                             use_rotary_embedding=i == 0 and self.use_rotary_embedding,
                              name=f'block_{i}')(x, is_training)
         return x
 
@@ -238,6 +203,7 @@ class ModelConfig(Protocol):
     value_size: int
     w_init_var: float
     embed_init_var: float
+    use_rotary_embedding: bool
     mlp_size: Optional[int] = None
     model_size: Optional[int] = None
     dropout: float = 0.1
@@ -267,26 +233,9 @@ class Model(hk.Module):
                  value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  dropout: float = 0.1,
+                 use_rotary_embedding: bool = False,
                  name: Optional[str] = None,
                  ) -> None:
-        '''Initialize the module.
-
-        Args:
-            vocab_size: Size of the vocabulary.
-            embedding_size: Size of the token embeddings.
-            max_sequence_length: Maximum sequence length.
-            num_layers: Number of stacked decoder blocks.
-            num_heads: Number of attention heads.
-            key_size: Size of the keys and queries for each attention head.
-            w_init: Initializer for the attention weights.
-            embed_init: Initializer for the embedding weights.
-            mlp_size: Size of the MLP hidden layer. If None, use four times the model size.
-            value_size: Size of the value vectors. If None, use the key size.
-            model_size: Size of the model. If None, use the key size multiplied
-                by the number of heads.
-            dropout: Dropout rate.
-            name: Name of the module.
-        '''
         super().__init__(name=name)
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
@@ -300,6 +249,10 @@ class Model(hk.Module):
         self.value_size = value_size or key_size
         self.model_size = model_size or key_size * num_heads
         self.dropout = dropout
+        self.use_rotary_embedding = use_rotary_embedding
+        if self.value_size * self.num_heads != self.model_size:
+            logger.warning('value_size * num_heads != model_size: '
+                           f'{self.value_size} * {self.num_heads} != {self.model_size}')
 
     @classmethod
     def from_config(cls,
@@ -315,31 +268,25 @@ class Model(hk.Module):
                    embed_init=hk.initializers.TruncatedNormal(config.embed_init_var),
                    mlp_size=config.mlp_size,
                    model_size=config.model_size,
-                   dropout=config.dropout)
+                   dropout=config.dropout,
+                   use_rotary_embedding=config.use_rotary_embedding)
 
     def __call__(self,
                  indices: Array,
                  is_training: bool,
                  ) -> Array:
-        '''Compute the output of a transformer decoder stack.
-
-        Args:
-            indices: Input indices. Shape: [batch_size, sequence_length].
-            is_training: Whether the model is in training mode.
-
-        Returns:
-            The output vectors. Shape: [batch_size, sequence_length, model_size].
-        '''
         chex.assert_rank(indices, 2)
         wte = hk.Embed(self.vocab_size,
                        self.embedding_size,
                        w_init=self.embed_init,
                        name='embedding')
-        pte = hk.Embed(self.max_sequence_length,
-                       self.embedding_size,
-                       w_init=self.embed_init,
-                       name='positional_embedding')
-        x = wte(indices) + pte(jnp.arange(indices.shape[1])[None, :])
+        x = wte(indices)
+        if not self.use_rotary_embedding:
+            pte = hk.Embed(self.max_sequence_length,
+                           self.embedding_size,
+                           w_init=self.embed_init,
+                           name='positional_embedding')
+            x = x + pte(jnp.arange(indices.shape[1])[None, :])
         if self.model_size != self.embedding_size:
             x = hk.Linear(self.model_size,
                           with_bias=False,
@@ -352,6 +299,7 @@ class Model(hk.Module):
                     mlp_size=self.mlp_size,
                     model_size=self.model_size,
                     dropout=self.dropout,
+                    use_rotary_embedding=self.use_rotary_embedding,
                     name='decoder')(x, is_training)
         x = hk.LayerNorm(-1, True, False, name='layer_norm')(x)
         x = hk.Linear(self.embedding_size,

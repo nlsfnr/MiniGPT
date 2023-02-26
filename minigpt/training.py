@@ -356,6 +356,7 @@ class Config(common.YamlConfig):
     key_size: int
     w_init_var: float
     embed_init_var: float
+    use_rotary_embedding: bool
     mlp_size: Optional[int] = None
     model_size: Optional[int] = None
     dropout: float = 0.1
