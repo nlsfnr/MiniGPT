@@ -1,4 +1,4 @@
-batch_size: 2048
+batch_size: 288  # To fit on an A100
 use_half_precision: true
 loss_scale_period: 2000
 initial_loss_scale_log2: 15
@@ -25,8 +25,8 @@ dropout: 0.0
 use_rotary_embedding: true
 
 # Data config
-datasets: ['imdb', 'wikitext', 'c4', 'bookcorpus']
-dataset_weights: [0.1, 1, 20, 5]
+datasets: ['imdb', 'wikitext', 'c4']
+dataset_weights: [0.1, 1, 20]
 min_frequency: 100
 min_length: 96
 shuffle_buffer_size: 5000
