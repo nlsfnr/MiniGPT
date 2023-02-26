@@ -4,6 +4,7 @@ loss_scale_period: 500
 initial_loss_scale_log2: 15
 peak_learning_rate: 0.002
 end_learning_rate: 0.0001
+max_gradient_norm: 0.5
 warmup_steps: 100
 total_steps: 10000
 weight_decay: 0.01
@@ -25,8 +26,8 @@ dropout: 0.1
 use_rotary_embedding: true
 
 # Data config
-datasets: ['imdb', 'wikitext', 'c4', 'bookcorpus']
-dataset_weights: [0.1, 1, 20, 5]
+datasets: ['imdb', 'wikitext', 'c4']
+dataset_weights: [0.1, 1, 20]
 min_frequency: 100
 min_length: 24
 shuffle_buffer_size: 500

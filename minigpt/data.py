@@ -133,6 +133,9 @@ def stream_hf_dataset(name: str,
     elif name == 'bookcorpus':
         fn_1 = partial(datasets.load_dataset, 'bookcorpus', split='train', streaming=True)
         fn = lambda: buffer(iter(fn_1()), 5000)
+    elif name == 'openwebtext':
+        fn_1 = partial(datasets.load_dataset, 'openwebtext', split='train', streaming=True)
+        fn = lambda: buffer(iter(fn_1()), 5000)
     elif name == 'dummy':
         fn = lambda: iter([dict(text='Hello world!')] * 5)
     else:

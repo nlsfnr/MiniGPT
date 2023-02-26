@@ -87,6 +87,7 @@ def get_cli() -> click.Group:
         mlp_size: Optional[int] = None
         model_size: Optional[int] = None
         dropout: float = 0.1
+        use_rotary_embedding: bool
 
     cli = common.get_cli_group('inference')
 

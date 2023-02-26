@@ -45,6 +45,7 @@ class TrainingConfig(nn.ModelConfig, Protocol):
     initial_loss_scale_log2: Optional[int]
     peak_learning_rate: float
     end_learning_rate: float
+    max_gradient_norm: float
     warmup_steps: int
     total_steps: Optional[int]
     weight_decay: float
@@ -177,8 +178,11 @@ def loss_fn(indices: Array,
 
 def get_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     '''Get the optimizer with linear warmup and cosine decay.'''
-    return optax.adamw(get_learning_rate_schedule(config),
-                       weight_decay=config.weight_decay)
+    return optax.chain(
+        # Gradient clipping
+        optax.clip_by_global_norm(config.max_gradient_norm),
+        optax.adamw(get_learning_rate_schedule(config), weight_decay=config.weight_decay)
+    )
 
 
 def get_policy(config: TrainingConfig) -> jmp.Policy:
@@ -341,6 +345,7 @@ class Config(common.YamlConfig):
     initial_loss_scale_log2: Optional[int]
     peak_learning_rate: float
     end_learning_rate: float
+    max_gradient_norm: float
     warmup_steps: int
     total_steps: Optional[int]
     weight_decay: float
