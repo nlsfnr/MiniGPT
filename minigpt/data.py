@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import logging
+import random
 import sys
-import time
+import threading
+from functools import partial
 from itertools import islice, tee
 from pathlib import Path
-from typing import (Any, Dict, Iterable, Iterator, List, Optional, Protocol,
-                    Tuple, TypeVar, Union)
+from queue import Queue
+from typing import (Any, Callable, Dict, Iterable, Iterator, List, Optional,
+                    Protocol, TypeVar, Union)
 
 import click
 import datasets
-import lmdb
 import numpy as np
 import tokenizers.processors
 import torch
-from torch.utils.data import DataLoader, Dataset
-from tqdm import tqdm
+from torch.utils.data import DataLoader, IterableDataset
 
 import tokenizers  # type: ignore
 from tokenizers import Tokenizer  # type: ignore
@@ -38,94 +38,31 @@ PAD_TOKEN = '[PAD]'
 logger = logging.getLogger(common.NAME)
 
 
-# Disable CUDA for torch, since we only want Jax to use it
+# Disable CUDA for torch since we only want Jax to use it
 torch.cuda.is_available = lambda: False
 
 
 class DataConfig(Protocol):
     '''Protocol for data configuration'''
-    dataset_path: Path
+    datasets: List[str]
+    dataset_weights: List[float]
     tokenizer_path: Path
+    vocab_size: int
+    min_frequency: int
+    min_length: int
+    tokenizer_kind: str
 
 
-class DataLoaderConfig(Protocol):
+class DataLoaderConfig(DataConfig, Protocol):
     '''Protocol for data loader configuration'''
     batch_size: int
     num_workers: int
     max_sequence_length: int
+    shuffle_buffer_size: int
 
 
 TokenizerLike = Union[Path, Tokenizer]
-DatasetLike = Union[Path, 'LMDBDataset']
 T = TypeVar('T')
-
-
-class LMDBDataset(Dataset):
-
-    @classmethod
-    def from_config(cls,
-                    config: DataConfig,
-                    ) -> LMDBDataset:
-        return cls(config.dataset_path, config.tokenizer_path)
-
-    def __init__(self,
-                 db_path: Path,
-                 tokenizer: TokenizerLike,
-                 ) -> None:
-        self.db_path = db_path
-        if not db_path.exists():
-            logger.error(f'LMDB database {db_path} does not exist')
-            raise FileNotFoundError(db_path)
-        self.tokenizer = get_tokenizer(tokenizer)
-        self.env = lmdb.open(str(db_path), readonly=True, lock=False, readahead=False,
-                             meminit=False)
-        self.txn = self.env.begin(write=False)
-        self.keys = json.loads(self.txn.get('keys'.encode()).decode())
-        self.length = len(self.keys)
-
-    def __len__(self) -> int:
-        return self.length
-
-    def __getitem__(self, index: int) -> Dict[str, Any]:
-        value = self.txn.get(self.keys[index].encode())
-        sample = json.loads(value.decode())
-        return sample
-
-    def get_dataloader_from_config(self,
-                                   config: DataLoaderConfig,
-                                   additional_sequence_length: int = 0,
-                                   ) -> DataLoader:
-        return self.get_dataloader(config.batch_size,
-                                   config.max_sequence_length + additional_sequence_length,
-                                   config.num_workers)
-
-    def get_dataloader(self,
-                       batch_size: int,
-                       sequence_length: int,
-                       num_workers: int,
-                       ) -> DataLoader:
-        self.tokenizer.enable_truncation(sequence_length)
-        self.tokenizer.enable_padding(pad_id=self.tokenizer.token_to_id(PAD_TOKEN),
-                                      length=sequence_length)
-
-        def collate_fn(samples: List[Dict[str, Any]]) -> np.ndarray:
-            encodings = self.tokenizer.encode_batch([sample['text'] for sample in samples])
-            return np.asarray([encoding.ids for encoding in encodings])
-
-        return DataLoader(self,
-                          batch_size=batch_size,
-                          collate_fn=collate_fn,
-                          pin_memory=True,
-                          drop_last=True,
-                          shuffle=True,
-                          num_workers=num_workers)
-
-
-def get_dataset(d: DatasetLike, t: TokenizerLike) -> LMDBDataset:
-    '''Ensures that the dataset is an LMDBDataset'''
-    if isinstance(d, Path):
-        return LMDBDataset(d, t)
-    return d
 
 
 def get_tokenizer(t: TokenizerLike) -> Tokenizer:
@@ -138,21 +75,115 @@ def get_tokenizer(t: TokenizerLike) -> Tokenizer:
     return t
 
 
-def load_hf_dataset(name: str,
-                    ) -> Iterator[Dict[str, Any]]:
-    '''Loads a dataset from HuggingFace and stores it in an LMDB database'''
-    dataset: Iterable[Dict[str, Any]]
+def get_batches(config: DataLoaderConfig,
+                ) -> Iterator[np.ndarray]:
+    '''Returns a DataLoader for the dataset'''
+    datasets = [stream_hf_dataset(name, repeat_when_done=True) for name in config.datasets]
+    datasets = [length_filter(dataset, min_length=config.min_length) for dataset in datasets]
+    datasets = [shuffle(dataset, config.shuffle_buffer_size) for dataset in datasets]
+    samples = merge_samples(datasets, config.dataset_weights)
+    tokenizer = get_tokenizer(config.tokenizer_path)
+    tokenizer.enable_truncation(config.max_sequence_length + 1)
+    tokenizer.enable_padding(pad_id=tokenizer.token_to_id(PAD_TOKEN),
+                             length=config.max_sequence_length + 1)
+
+    def collate_fn(samples: List[Dict[str, Any]]) -> np.ndarray:
+        encodings = tokenizer.encode_batch([sample['text'] for sample in samples])
+        return np.asarray([encoding.ids for encoding in encodings])
+
+    dl = DataLoader(IterDataset(samples),
+                    batch_size=config.batch_size,
+                    num_workers=1,
+                    collate_fn=collate_fn,
+                    pin_memory=True,
+                    drop_last=True,
+                    shuffle=False,
+                    )
+    return iter(dl)
+
+
+class IterDataset(IterableDataset):
+
+    def __init__(self, samples: Iterator[Dict[str, Any]]) -> None:
+        self.samples = samples
+
+    def __iter__(self) -> Iterator[Dict[str, Any]]:
+        return self.samples
+
+
+def stream_hf_dataset(name: str,
+                      repeat_when_done: bool = False,
+                      ) -> Iterator[Dict[str, Any]]:
+    # Construct a function that returns an interator over the dataset.
+    fn: Callable[[], Iterable[Dict[str, Any]]]
     if name == 'imdb':
-        dataset = datasets.load_dataset('imdb', split='unsupervised')
+        ds = datasets.load_dataset('imdb', split='unsupervised')
+        fn = lambda: iter(ds)
     elif name == 'wikitext':
-        dataset = datasets.load_dataset('wikitext', 'wikitext-103-raw-v1', split='train')
+        ds = datasets.load_dataset('wikitext', 'wikitext-103-raw-v1', split='train')
+        fn = lambda: iter(ds)
     elif name == 'c4':
-        dataset = datasets.load_dataset('c4', 'en', split='train')
+        fn_1 = partial(datasets.load_dataset, 'c4', 'en', split='train', streaming=True)
+        fn = lambda: buffer(iter(fn_1()), 5000)
     elif name == 'dummy':
-        dataset = [dict(text='Hello world!')] * 5
+        fn = lambda: iter([dict(text='Hello world!')] * 5)
     else:
         raise ValueError(f'Unknown dataset: {name}')
-    return (dict(text=sample['text']) for sample in dataset)
+    while True:
+        for sample in fn():
+            yield sample
+        if not repeat_when_done:
+            break
+        logger.info(f'Repeating dataset {name}')
+
+
+def buffer(it: Iterator[T],
+           buffer_size: int,
+           ) -> Iterator[T]:
+    queue: Queue[T] = Queue(maxsize=buffer_size)
+
+    def producer() -> None:
+        for x in it:
+            queue.put(x)
+
+    thread = threading.Thread(target=producer)
+    thread.start()
+    try:
+        while True:
+            yield queue.get()
+    finally:
+        thread.join()
+
+
+def shuffle(samples: Iterator[Dict[str, Any]],
+            buffer_size: int,
+            ) -> Iterator[Dict[str, Any]]:
+    logger.info(f'Filling shuffle buffer of size {buffer_size}')
+    buffer = list(islice(samples, buffer_size))
+    logger.info('Buffer filled')
+    for next_sample in samples:
+        index = random.randint(0, len(buffer) - 1)
+        chosen_sample, buffer[index] = buffer[index], next_sample
+        yield chosen_sample
+    yield from random.sample(buffer, len(buffer))
+
+
+def merge_samples(sample_streams: List[Iterator[Dict[str, Any]]],
+                  weights: List[float],
+                  seed: Optional[int] = None,
+                  ) -> Iterator[Dict[str, Any]]:
+    msg = (f'Number of sample streams ({len(sample_streams)}) does not match number of '
+           f'weights ({len(weights)})')
+    assert len(sample_streams) == len(weights), msg
+    rng = random.Random(seed)
+    while sum(weights) > 0:
+        index = rng.choices(range(len(sample_streams)), weights=weights)[0]
+        stream = sample_streams[index]
+        try:
+            yield next(stream)
+        except StopIteration:
+            logger.error(f'Sample stream exhausted: {index}')
+            weights[index] = 0
 
 
 def length_filter(samples: Iterator[Dict[str, Any]],
@@ -196,15 +227,11 @@ def chars_per_token_filter(samples: Iterator[Dict[str, Any]],
         logger.info(f'Removed {n_removed} samples that had too few characters per token')
 
 
-def tokenize_samples(samples_or_db_path: Union[Iterator[Dict[str, Any]], Path],
+def tokenize_samples(samples: Iterator[Dict[str, Any]],
                      tokenizer: TokenizerLike,
                      ) -> Iterator[Dict[str, Any]]:
     '''Tokenize a dataset and store the result in a new database. Uses batching
     to improve performance.'''
-    if isinstance(samples_or_db_path, Path):
-        samples = load_samples(samples_or_db_path)
-    else:
-        samples = samples_or_db_path
     tokenizer = get_tokenizer(tokenizer)
     samples_1, samples_2 = tee(samples)
     text_batches = into_chunks((sample['text']
@@ -227,17 +254,12 @@ def into_chunks(iterable: Iterator[T], size: int) -> Iterator[List[T]]:
         yield chunk
 
 
-def new_tokenizer(samples_or_db_path: Union[Iterator[Dict[str, Any]], Path],
+def new_tokenizer(samples: Iterator[Dict[str, Any]],
                   vocab_size: int = 1 << 15,
                   min_frequency: int = 10,
                   tokenizer_kind: str = 'sentencepiece',
                   ) -> Tokenizer:
     '''Create a new tokenizer from a stream of samples.'''
-    # Resolce the samples
-    if isinstance(samples_or_db_path, Path):
-        samples = load_samples(samples_or_db_path)
-    else:
-        samples = samples_or_db_path
     # Instantiate a new tokenizer.
     if tokenizer_kind == 'sentencepiece':
         tokenizer = tokenizers.SentencePieceBPETokenizer()  # type: ignore
@@ -266,161 +288,59 @@ def save_tokenizer(tokenizer: TokenizerLike,
     return tokenizer
 
 
-def load_samples(db_path: Path) -> Iterator[Dict[str, Any]]:
-    '''Load samples from a database.'''
-    env = lmdb.open(str(db_path), readonly=True, lock=False, readahead=False, meminit=False)
-    with env.begin(write=False) as txn:
-        keys = json.loads(txn.get('keys'.encode()).decode())
-        samples = (json.loads(txn.get(key.encode()).decode()) for key in keys)
-        yield from samples
-
-
-def store_samples(samples: Iterator[Dict[str, Any]],
-                  db_path: Path,
-                  ) -> None:
-    '''Store samples in an LMDB database'''
-    db_path.mkdir(parents=True, exist_ok=True)
-    env = lmdb.open(str(db_path), map_size=LMDB_MAP_SIZE)
-    with env.begin(write=True) as txn:
-        keys = []
-        for i, sample in tqdm(enumerate(samples)):
-            key = str(i)
-            txn.put(key.encode(), json.dumps(sample).encode())
-            keys.append(key)
-        txn.put('keys'.encode(), json.dumps(keys).encode())
-
-
-def get_n_tokens(db_like: DatasetLike,
-                 tokenizer_like: TokenizerLike,
-                 max_samples: Optional[int] = None,
-                 ) -> Tuple[int, float, float]:
-    '''Get the number of tokens in a dataset. To avoid tokenizing the entire
-    dataset only max_sampes are tokenzied and the total number of tokens in the
-    dataset are extrapolated from there. Returns the estimated number of tokens
-    and the variance of tokens pers sample across the tokenized samples.'''
-    tokenizer = get_tokenizer(tokenizer_like)
-    ds = get_dataset(db_like, tokenizer)
-    indices = np.random.permutation(np.arange(len(ds)))[:max_samples if max_samples else len(ds)]
-    n_tokens = []
-    for index in tqdm(indices):
-        text = ds[index]['text']
-        tokens = tokenizer.encode(text).ids
-        n_tokens.append(len(tokens))
-    return (int(sum(n_tokens) * len(ds) / len(indices)),
-            float(np.mean(n_tokens)),
-            float(np.var(n_tokens)))
-
-
 def get_cli() -> click.Group:
     '''Get the command line interface for this module.'''
 
     cli = common.get_cli_group('data')
 
-    @cli.command('new-dataset')
-    @click.option('--path', '-p', type=Path, required=True, help='Where to save the dataset')
-    @click.option('--name', '-n', type=str, required=True, help='Dataset name')
-    @click.option('--min-length', '-l', type=int, default=0, help='Minimum length of a sample')
-    @click.option('--min-chars-per-token', '-c', type=float, default=0.0,
-                  help='Maximum number of characters per token')
-    def cli_new_dataset(path: Path,
-                        name: str,
-                        min_length: int,
-                        min_chars_per_token: float,
-                        ) -> None:
-        '''Create a new dataset from Huggingface.'''
-        logger.info(f'Creating a new dataset at {path} with name {name}')
-        samples = load_hf_dataset(name)
-        if min_length > 0:
-            samples = length_filter(samples, min_length)
-        if min_chars_per_token > 0.0:
-            samples = chars_per_token_filter(samples, min_chars_per_token)
-        store_samples(samples, path)
-        logger.info('Done')
-
     @cli.command('show-samples')
-    @click.option('--dataset-path', '-d', type=Path, required=True, help='Path to the dataset')
+    @click.option('--dataset', '-d', type=str, required=True,
+                  help='The dataset to show samples from.')
+    @click.option('--shuffle-buffer', '-s', type=int, default=1000,
+                  help='The shuffle buffer size.')
     @click.option('--num-samples', '-n', type=int, default=10, help='Number of samples to show')
-    def cli_show_samples(dataset_path: Path,
+    def cli_show_samples(dataset: str,
+                         shuffle_buffer: int,
                          num_samples: int,
                          ) -> None:
         '''Show a few samples from a dataset.'''
-        samples = load_samples(dataset_path)
+        samples = stream_hf_dataset(dataset)
+        samples = shuffle(samples, shuffle_buffer)
         for _ in range(num_samples):
             print(next(samples))
 
+    class Config(common.YamlConfig):
+        datasets: List[str]
+        dataset_weights: List[float]
+        tokenizer_path: Path
+        vocab_size: int
+        min_frequency: int
+        min_length: int
+        tokenizer_kind: str
+
     @cli.command('new-tokenizer')
-    @click.option('--path', '-p', type=Path, required=True, help='Where to save the tokenizer')
-    @click.option('--kind', '-k', type=str, required=True, help='Tokenizer kind')
-    @click.option('--db-path', '-d', type=Path, required=True, help='Path to the database')
-    @click.option('--vocab-size', '-v', type=int, default=1 << 15, help='Vocabulary size')
-    @click.option('--min-frequency', '-m', type=int, default=10,
-                  help='Minimum frequency of a word to be included in the vocabulary')
-    def cli_new_tokenizer(path: Path,
-                          kind: str,
-                          db_path: Path,
-                          vocab_size: int,
-                          min_frequency: int,
+    @click.option('--config-path', '-c', type=Path, required=True,
+                  help='Path to the config file')
+    @click.option('--max-samples', '-m', type=int, default=None,
+                  help='Maximum number of samples to use for training the tokenizer.')
+    def cli_new_tokenizer(config_path: Path,
+                          max_samples: Optional[int],
                           ) -> None:
         '''Create a new tokenizer from a database.'''
-        logger.info(f'Creating a new tokenizer at {path} with kind {kind}, '
-                    f'vocab size {vocab_size}, min frequency {min_frequency}')
-        tokenizer = new_tokenizer(db_path, vocab_size, min_frequency, kind)
-        save_tokenizer(tokenizer, path)
-        logger.info('Done')
-
-    @cli.command('perf')
-    @click.option('--db-path', '-d', type=Path, required=True,
-                  help='Path to the database')
-    @click.option('--tokenizer-path', '-t', type=Path, required=True,
-                  help='Path to the tokenizer')
-    @click.option('--batch-size', '-b', type=int, default=1,
-                  help='Batch size')
-    @click.option('--sequence-length', '-s', type=int, default=32,
-                  help='Sequence length')
-    @click.option('--num-workers', '-n', type=int, default=3,
-                  help='Number of workers')
-    @click.option('--num-samples', '-s', type=int, default=1000,
-                  help='Number of samples to use for performance estimation')
-    def cli_perf(db_path: Path,
-                 tokenizer_path: Path,
-                 batch_size: int,
-                 sequence_length: int,
-                 num_workers: int,
-                 num_samples: int,
-                 ) -> None:
-        '''Estimate the performance of a tokenizer.'''
-        logger.info(f'Estimating the performance of {tokenizer_path} on {db_path}')
-        tokenizer = get_tokenizer(tokenizer_path)
-        ds = get_dataset(db_path, tokenizer)
-        dl = ds.get_dataloader(batch_size=batch_size,
-                               sequence_length=sequence_length,
-                               num_workers=num_workers)
-        t0 = time.time()
-        it = iter(dl)
-        for _ in tqdm(range(num_samples)):
-            next(it)
-        t1 = time.time()
-        logger.info(f'Estimated performance: {num_samples / (t1 - t0):.2f} samples/s')
-
-    @cli.command('n-tokens')
-    @click.option('--db-path', '-d', type=Path, required=True,
-                  help='Path to the database')
-    @click.option('--tokenizer-path', '-t', type=Path, required=True,
-                  help='Path to the tokenizer')
-    @click.option('--max-samples', '-m', type=int, default=None,
-                  help='Maximum number of samples to use for estimation')
-    def cli_n_tokens(db_path: Path,
-                     tokenizer_path: Path,
-                     max_samples: Optional[int],
-                     ) -> None:
-        '''Estimate the number of tokens in a dataset.'''
-        logger.info(f'Estimating the number of tokens in {db_path}')
-        tokenizer = get_tokenizer(tokenizer_path)
-        ds = get_dataset(db_path, tokenizer)
-        n_tokens, mean, var = get_n_tokens(ds, tokenizer, max_samples)
-        logger.info(f'Estimated number of tokens: {n_tokens / 1e6:.2f}M'
-                    f' (mean: {mean:.2f}'
-                    f', variance: {var:.2f})')
+        config: DataConfig = Config.from_yaml(config_path)
+        sample_streams = [stream_hf_dataset(dataset)
+                          for dataset in config.datasets]
+        sample_streams = [length_filter(stream, config.min_length)
+                          for stream in sample_streams]
+        samples = merge_samples(sample_streams, config.dataset_weights)
+        if max_samples is not None:
+            samples = islice(samples, max_samples)
+        tokenizer = new_tokenizer(samples,
+                                  vocab_size=config.vocab_size,
+                                  min_frequency=config.min_frequency,
+                                  tokenizer_kind=config.tokenizer_kind)
+        save_tokenizer(tokenizer, config.tokenizer_path)
+        logger.info(f'Saved tokenizer to {config.tokenizer_path}')
 
     return cli
 
