@@ -77,11 +77,6 @@ def test_model_call() -> None:
 
 
 def test_rotary_embeddings() -> None:
-
-    @hk.testing.transform_and_run
-    def fn() -> None:
-        re = nn.RotaryEmbedding(10)
-        x = jax.random.normal(jax.random.PRNGKey(42), (1, 8, 4))
-        y = re(x)
-
-    fn()  # type: ignore
+    x = jax.random.normal(jax.random.PRNGKey(42), (1, 8, 4))
+    y = nn.rotary_pos_emb(x)
+    assert x.shape == y.shape

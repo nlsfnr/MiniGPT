@@ -24,22 +24,22 @@ T = TypeVar('T')
 
 def rotary_pos_emb(x: Array,  # B H S D
                    ) -> Array:
-        dim = x.shape[-1]
-        seq = x.shape[-2]
-        # Near eq. 15 in https://arxiv.org/abs/2104.09864, equivalent to those
-        # in https://arxiv.org/abs/1706.03762
-        ts = jnp.arange(0, dim, 2, dtype=jnp.float32)
-        inv_freqs = 10_000 ** (-ts / dim)
-        grid = jnp.einsum('s, d -> s d', jnp.arange(seq), inv_freqs)
-        # Eq. 34 in https://arxiv.org/abs/2104.09864
-        sin_embs = repeat(jnp.sin(grid), 's d -> 1 s (d 2)')
-        cos_embs = repeat(jnp.cos(grid), 's d -> 1 s (d 2)')
-        # Pairwise swap with alternating signs
-        x1, x2 = x[..., ::2], x[..., 1::2]  # [x1, x3, x5, ...], [x2, x4, x6, ...]
-        x1x2 = jnp.stack([-x2, x1], axis=-1)  # [[-x2, x1], [-x4, x3], ...]
-        xs = rearrange(x1x2, '... d two -> ... (d two)', two=2)  # [-x2, x1, -x4, x3, ...]
-        out = x * cos_embs + xs * sin_embs
-        return out
+    dim = x.shape[-1]
+    seq = x.shape[-2]
+    # Near eq. 15 in https://arxiv.org/abs/2104.09864, equivalent to those
+    # in https://arxiv.org/abs/1706.03762
+    ts = jnp.arange(0, dim, 2, dtype=jnp.float32)
+    inv_freqs = 10_000 ** (-ts / dim)
+    grid = jnp.einsum('s, d -> s d', jnp.arange(seq), inv_freqs)
+    # Eq. 34 in https://arxiv.org/abs/2104.09864
+    sin_embs = repeat(jnp.sin(grid), 's d -> 1 s (d 2)')
+    cos_embs = repeat(jnp.cos(grid), 's d -> 1 s (d 2)')
+    # Pairwise swap with alternating signs
+    x1, x2 = x[..., ::2], x[..., 1::2]  # [x1, x3, x5, ...], [x2, x4, x6, ...]
+    x1x2 = jnp.stack([-x2, x1], axis=-1)  # [[-x2, x1], [-x4, x3], ...]
+    xs = rearrange(x1x2, '... d two -> ... (d two)', two=2)  # [-x2, x1, -x4, x3, ...]
+    out = x * cos_embs + xs * sin_embs
+    return out
 
 
 class MultiHeadAttention(hk.Module):

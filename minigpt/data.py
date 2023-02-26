@@ -77,37 +77,42 @@ def get_tokenizer(t: TokenizerLike) -> Tokenizer:
 
 def get_batches(config: DataLoaderConfig,
                 ) -> Iterator[np.ndarray]:
-    '''Returns a DataLoader for the dataset'''
-    datasets = [stream_hf_dataset(name, repeat_when_done=True) for name in config.datasets]
-    datasets = [length_filter(dataset, min_length=config.min_length) for dataset in datasets]
-    datasets = [shuffle(dataset, config.shuffle_buffer_size) for dataset in datasets]
-    samples = merge_samples(datasets, config.dataset_weights)
     tokenizer = get_tokenizer(config.tokenizer_path)
-    tokenizer.enable_truncation(config.max_sequence_length + 1)
-    tokenizer.enable_padding(pad_id=tokenizer.token_to_id(PAD_TOKEN),
-                             length=config.max_sequence_length + 1)
 
-    def collate_fn(samples: List[Dict[str, Any]]) -> np.ndarray:
-        encodings = tokenizer.encode_batch([sample['text'] for sample in samples])
-        return np.asarray([encoding.ids for encoding in encodings])
+    def fn(dataset_name: str) -> Iterator[np.ndarray]:
+        samples = stream_hf_dataset(dataset_name, repeat_when_done=True)
+        samples = tokenize_samples(samples, tokenizer)
+        ids: Iterator[List[int]]
+        ids = (sample['input_ids'] for sample in samples)
+        ids = (chunk
+               for sample in ids
+               for chunk in into_chunks(sample, config.max_sequence_length + 1))
+        ids = length_filter(ids, config.min_length)
+        np_ids = (np.asarray(chunk) for chunk in ids)
+        return shuffle(np_ids, config.shuffle_buffer_size)
 
-    dl = DataLoader(IterDataset(samples),
+    all_ids = [fn(name) for name in config.datasets]
+    ids = merge_samples(all_ids, config.dataset_weights)
+    # Pad each sample
+    pad_token = tokenizer.token_to_id(PAD_TOKEN)
+    ids = (np.pad(chunk, (0, config.max_sequence_length + 1 - len(chunk)),
+                  constant_values=pad_token)
+           for chunk in ids)
+    dl = DataLoader(IterDataset(ids),
                     batch_size=config.batch_size,
                     num_workers=1,
-                    collate_fn=collate_fn,
                     pin_memory=True,
                     drop_last=True,
-                    shuffle=False,
-                    )
+                    shuffle=False)
     return iter(dl)
 
 
 class IterDataset(IterableDataset):
 
-    def __init__(self, samples: Iterator[Dict[str, Any]]) -> None:
+    def __init__(self, samples: Iterator[np.ndarray]) -> None:
         self.samples = samples
 
-    def __iter__(self) -> Iterator[Dict[str, Any]]:
+    def __iter__(self) -> Iterator[np.ndarray]:
         return self.samples
 
 
@@ -125,10 +130,14 @@ def stream_hf_dataset(name: str,
     elif name == 'c4':
         fn_1 = partial(datasets.load_dataset, 'c4', 'en', split='train', streaming=True)
         fn = lambda: buffer(iter(fn_1()), 5000)
+    elif name == 'bookcorpus':
+        fn_1 = partial(datasets.load_dataset, 'bookcorpus', split='train', streaming=True)
+        fn = lambda: buffer(iter(fn_1()), 5000)
     elif name == 'dummy':
         fn = lambda: iter([dict(text='Hello world!')] * 5)
     else:
         raise ValueError(f'Unknown dataset: {name}')
+    logger.info(f'Loading dataset {name}')
     while True:
         for sample in fn():
             yield sample
@@ -155,9 +164,9 @@ def buffer(it: Iterator[T],
         thread.join()
 
 
-def shuffle(samples: Iterator[Dict[str, Any]],
+def shuffle(samples: Iterator[T],
             buffer_size: int,
-            ) -> Iterator[Dict[str, Any]]:
+            ) -> Iterator[T]:
     logger.info(f'Filling shuffle buffer of size {buffer_size}')
     buffer = list(islice(samples, buffer_size))
     logger.info('Buffer filled')
@@ -168,10 +177,10 @@ def shuffle(samples: Iterator[Dict[str, Any]],
     yield from random.sample(buffer, len(buffer))
 
 
-def merge_samples(sample_streams: List[Iterator[Dict[str, Any]]],
+def merge_samples(sample_streams: List[Iterator[T]],
                   weights: List[float],
                   seed: Optional[int] = None,
-                  ) -> Iterator[Dict[str, Any]]:
+                  ) -> Iterator[T]:
     msg = (f'Number of sample streams ({len(sample_streams)}) does not match number of '
            f'weights ({len(weights)})')
     assert len(sample_streams) == len(weights), msg
@@ -186,14 +195,15 @@ def merge_samples(sample_streams: List[Iterator[Dict[str, Any]]],
             weights[index] = 0
 
 
-def length_filter(samples: Iterator[Dict[str, Any]],
+def length_filter(samples: Iterator[T],
                   min_length: int,
                   verbose: bool = True,
-                  ) -> Iterator[Dict[str, Any]]:
+                  key: Callable[[T], int] = len,  # type: ignore
+                  ) -> Iterator[T]:
     '''Filters out samples that are too short.'''
     n_removed = 0
     for sample in samples:
-        if len(sample['text']) >= min_length:
+        if key(sample) >= min_length:
             yield sample
         else:
             n_removed += 1
@@ -244,7 +254,7 @@ def tokenize_samples(samples: Iterator[Dict[str, Any]],
     return samples
 
 
-def into_chunks(iterable: Iterator[T], size: int) -> Iterator[List[T]]:
+def into_chunks(iterable: Iterable[T], size: int) -> Iterator[List[T]]:
     '''Yield successive n-sized chunks from iterable.'''
     iterator = iter(iterable)
     while True:
@@ -293,21 +303,37 @@ def get_cli() -> click.Group:
 
     cli = common.get_cli_group('data')
 
+    class DLConfig(common.YamlConfig):
+        datasets: List[str]
+        dataset_weights: List[float]
+        tokenizer_path: Path
+        vocab_size: int
+        min_frequency: int
+        min_length: int
+        tokenizer_kind: str
+        batch_size: int
+        num_workers: int
+        max_sequence_length: int
+        shuffle_buffer_size: int
+
     @cli.command('show-samples')
-    @click.option('--dataset', '-d', type=str, required=True,
-                  help='The dataset to show samples from.')
-    @click.option('--shuffle-buffer', '-s', type=int, default=1000,
-                  help='The shuffle buffer size.')
+    @click.option('--config-path', '-c', type=Path,
+                  help='Path to the configuration file.')
     @click.option('--num-samples', '-n', type=int, default=10, help='Number of samples to show')
-    def cli_show_samples(dataset: str,
-                         shuffle_buffer: int,
+    def cli_show_samples(config_path: Path,
                          num_samples: int,
                          ) -> None:
         '''Show a few samples from a dataset.'''
-        samples = stream_hf_dataset(dataset)
-        samples = shuffle(samples, shuffle_buffer)
+        config = DLConfig.from_yaml(config_path)
+        batches = get_batches(config)
+        tokenizer = get_tokenizer(config.tokenizer_path)
+        samples = (sample
+                   for batch in batches
+                   for sample in batch)
         for _ in range(num_samples):
-            print(next(samples))
+            sample = next(samples)
+            print(sample)
+            print(tokenizer.decode(list(sample)))
 
     class Config(common.YamlConfig):
         datasets: List[str]
@@ -330,7 +356,7 @@ def get_cli() -> click.Group:
         config: DataConfig = Config.from_yaml(config_path)
         sample_streams = [stream_hf_dataset(dataset)
                           for dataset in config.datasets]
-        sample_streams = [length_filter(stream, config.min_length)
+        sample_streams = [length_filter(stream, config.min_length, key=lambda x: len(x['text']))
                           for stream in sample_streams]
         samples = merge_samples(sample_streams, config.dataset_weights)
         if max_samples is not None:
