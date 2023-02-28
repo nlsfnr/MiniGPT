@@ -98,6 +98,7 @@ def get_batches(config: DataLoaderConfig,
     ids = (np.pad(chunk, (0, config.max_sequence_length + 1 - len(chunk)),
                   constant_values=pad_token)
            for chunk in ids)
+    # TODO: DataLoader really required? Can we not just batch manually?
     dl = DataLoader(IterDataset(ids),
                     batch_size=config.batch_size,
                     num_workers=1,
