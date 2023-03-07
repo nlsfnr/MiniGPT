@@ -1,0 +1,8 @@
+click
+
+# CI and Dev-Ops
+mypy
+black
+flake8
+isort
+pytest
