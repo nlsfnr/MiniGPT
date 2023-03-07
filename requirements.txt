@@ -1,4 +1,10 @@
+# Data
+datasets
+tokenizers
+
 click
+pyyaml
+tqdm
 
 # CI and Dev-Ops
 mypy
@@ -6,3 +12,4 @@ black
 flake8
 isort
 pytest
+pytest-benchmark

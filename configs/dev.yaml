@@ -1,0 +1,24 @@
+# Config to run a throughput test on the C4 dataset and the tokenizer in
+# ./tokenizers/c4-en-8192.json
+
+dataset:
+  huggingface:
+    args: [c4, en]
+    kwargs: {split: train}
+    streaming: true
+  buffering:
+    buffer_size: 1000
+    timeout: 0.1
+  tokenizer:
+    path: ./tokenizers/c4-en-8192.json
+  shuffle:
+    buffer_size: 1000
+    seed: 42
+
+
+tokenizer:
+  vocabulary_size: 8192  # 2**13
+  min_token_frequency: 100
+  max_samples: 10_000_000
+  key: text
+  path: ./tokenizers/c4-en-8192.json

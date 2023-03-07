@@ -2,8 +2,8 @@ VENV=.venv
 PYTHON=$(VENV)/bin/python3
 DOCKER=minigpt
 PIP_FREEZE=.requirements.freeze.txt
-TEST_DIR=minigpt/
-PY_FILES=minigpt/
+TEST_DIR=minigpt/ scripts/
+PY_FILES=minigpt/ scripts/
 
 .PHONY: ci
 ci: $(PY_FILES) py-deps type-check format test
