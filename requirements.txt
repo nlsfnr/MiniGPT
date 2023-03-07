@@ -12,4 +12,3 @@ black
 flake8
 isort
 pytest
-pytest-benchmark

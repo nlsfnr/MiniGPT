@@ -14,11 +14,16 @@ dataset:
   shuffle:
     buffer_size: 1000
     seed: 42
+  collation:
+    batch_size: 32
+    drop_last: true
+    sequence_length: 32
+    min_sequence_length: 24
 
 
 tokenizer:
   vocabulary_size: 8192  # 2**13
   min_token_frequency: 100
-  max_samples: 10_000_000
+  max_samples: 1_000_000
   key: text
   path: ./tokenizers/c4-en-8192.json

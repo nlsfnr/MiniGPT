@@ -1,16 +1,20 @@
 import string
 import time
-from functools import partial
 from itertools import tee
-from typing import Iterator
+from typing import Iterable, Iterator, Sequence
 
 import numpy as np
 import pytest
-from pytest_benchmark.fixture import BenchmarkFixture as Benchmark  # type: ignore
-
-from tokenizers import Tokenizer  # type: ignore
 
 from . import data
+
+
+@pytest.fixture
+def tokenizer() -> data.TokenizerFn:
+    def tokenize_batch(texts: Sequence[str]) -> Sequence[Sequence[int]]:
+        return [[ord(c) for c in s] for s in texts]
+
+    return tokenize_batch
 
 
 def gibberish(
@@ -40,9 +44,10 @@ def test_compound_dataset() -> None:
         assert isinstance(sample["text"], str)
 
 
-def test_bert_tokenizer() -> None:
+def test_tokenized_dataset(
+    tokenizer: data.TokenizerFn,
+) -> None:
     dataset = gibberish()
-    tokenizer = Tokenizer.from_pretrained("bert-base-uncased")
     tokenized_dataset = data.TokenizedDataset(dataset, tokenizer, batch_size=3)
     samples = iter(tokenized_dataset)
     sample = next(samples)
@@ -65,14 +70,49 @@ def test_batched_unbatched_symmetry() -> None:
         assert expected == actual
 
 
-@pytest.mark.parametrize("jitter", [0.001, 0.01, 0.1])
-@pytest.mark.parametrize("buffer_size", [1, 10, 100])
-def test_buffered_dataset_smoothing_effect_bench(
-    benchmark: Benchmark,
-    jitter: float,
-    buffer_size: int,
+def test_chunked_dataset(
+    tokenizer: data.TokenizerFn,
 ) -> None:
-    dataset_fn = partial(gibberish, temporal_jitter=jitter)
-    buffered_dataset = data.BufferedDataset(dataset_fn, buffer_size=buffer_size)
-    samples = iter(buffered_dataset)
-    benchmark(next, samples)
+    dataset: Iterable[data.Sample]
+    dataset = gibberish()
+    dataset = data.TokenizedDataset(dataset, tokenizer)
+    chunked_dataset = data.ChunkedDataset(dataset, chunk_size=10)
+    samples = iter(chunked_dataset)
+    for _ in range(1000):
+        sample = next(samples)
+        assert isinstance(sample, dict)
+        assert "input_ids" in sample
+        assert isinstance(sample["input_ids"], Sequence)
+        assert all(isinstance(x, int) for x in sample["input_ids"])
+        assert len(sample["input_ids"]) <= 10
+
+
+def test_padded_dataset(
+    tokenizer: data.TokenizerFn,
+) -> None:
+    dataset: Iterable[data.Sample]
+    dataset = gibberish(max_length=7)
+    dataset = data.TokenizedDataset(dataset, tokenizer)
+    padded_dataset = data.PaddedDataset(dataset, padding_value=0, length=10)
+    samples = iter(padded_dataset)
+    for _ in range(1000):
+        sample = next(samples)
+        assert isinstance(sample, dict)
+        assert "input_ids" in sample
+        assert isinstance(sample["input_ids"], Sequence)
+        assert all(isinstance(x, int) for x in sample["input_ids"])
+        assert len(sample["input_ids"]) == 10
+
+
+def test_chunked_and_padded_dataset(
+    tokenizer: data.TokenizerFn,
+) -> None:
+    dataset: Iterable[data.Sample]
+    dataset = gibberish(min_length=0, max_length=1000)
+    dataset = data.TokenizedDataset(dataset, tokenizer)
+    dataset = data.ChunkedDataset(dataset, chunk_size=10)
+    dataset = data.PaddedDataset(dataset, padding_value=0, length=10)
+    samples = iter(dataset)
+    for _ in range(1000):
+        sample = next(samples)
+        assert len(sample["input_ids"]) == 10

@@ -19,7 +19,7 @@ def cli(
 ) -> None:
     minigpt.setup_logging()
     config = minigpt.Config.from_yaml(config_path)
-    dataset = data.from_config(config.dataset, tokenize=False)
+    dataset = data.samples_from_config(config.dataset, tokenize=False, shuffle=False)
     data.train_tokenizer_from_config(dataset, config.tokenizer)
 
 
