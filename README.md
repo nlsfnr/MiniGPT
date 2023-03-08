@@ -1,5 +1,7 @@
 # MiniGPT
 
+*This repository is currently getting re-written. See the `v2` branch.**
+
 This is MiniGPT, a GPT-like language model built using *JAX*, *Haiku* and
 *Optax*. The neural network components are all implemented from scratch and are
 well documented. This project was loosely inspired by A. Karpathy's
