@@ -24,7 +24,7 @@ import datasets
 import numpy as np
 import tokenizers.processors
 
-from minigpt.common import get_logger
+from minigpt.common import get_logger, require_implementation
 from tokenizers import SentencePieceBPETokenizer, Tokenizer  # type: ignore
 
 logger = get_logger()
@@ -93,7 +93,7 @@ class HuggingFaceDataset(Iterable[Sample]):
         cls,
         config: HuggingFaceDatasetConfig,
     ) -> HuggingFaceDataset:
-        assert isinstance(config, HuggingFaceDatasetConfig)
+        require_implementation(config, HuggingFaceDatasetConfig)
         return cls(
             args=config.args,
             kwargs=config.kwargs,
@@ -140,7 +140,7 @@ class ShuffledDataset(Iterable[T]):
         dataset: Iterable[T],
         config: ShuffledDatasetConfig,
     ) -> ShuffledDataset:
-        assert isinstance(config, ShuffledDatasetConfig)
+        require_implementation(config, ShuffledDatasetConfig)
         return cls(
             dataset=dataset,
             buffer_size=config.buffer_size,
@@ -162,22 +162,41 @@ class ShuffledDataset(Iterable[T]):
             yield buffer.pop(index)
 
 
+@runtime_checkable
+class BatchedDatasetConfig(Protocol):
+    size: int
+    drop_last: bool
+
+
 class BatchedDataset(Iterable[Batch]):
     def __init__(
         self,
         dataset: Iterable[Sample],
         batch_size: int,
+        drop_last: bool = False,
     ) -> None:
         self.dataset = dataset
         self.batch_size = batch_size
+        self.drop_last = drop_last
+
+    @classmethod
+    def from_config(
+        cls,
+        dataset: Iterable[Sample],
+        config: BatchedDatasetConfig,
+    ) -> BatchedDataset:
+        require_implementation(config, BatchedDatasetConfig)
+        return cls(dataset, config.size, config.drop_last)
 
     def __iter__(self) -> Iterator[Batch]:
         batch = []
         for sample in self.dataset:
             batch.append(sample)
-            if len(batch) == self.batch_size:
+            if len(batch) >= self.batch_size:
                 yield self._batchify(batch)
-                batch.clear()
+                batch = []
+        if batch and not self.drop_last:
+            yield self._batchify(batch)
 
     def _batchify(self, samples: Sequence[Sample]) -> Batch:
         """Converts a batch of samples into a batch of tensors."""
@@ -279,9 +298,9 @@ class ChunkedDataset(Iterable[Sample]):
         for sample in self.dataset:
             xs = sample[self.input_key]
             assert isinstance(xs, Sequence)
-            for index in range(0, len(xs), self.chunk_size):
-                chunk = xs[index : index + self.chunk_size]
-                yield {self.output_key: chunk}
+            while xs:
+                yield {self.output_key: xs[: self.chunk_size]}
+                xs = xs[self.chunk_size :]
 
 
 class PaddedDataset(Iterable[Sample]):
@@ -339,7 +358,7 @@ class BufferedDataset(Iterable[T]):
     def from_config(
         cls, dataset_fn: Callable[[], Iterable[T]], config: BufferedDatasetConfig
     ) -> BufferedDataset:
-        assert isinstance(config, BufferedDatasetConfig)
+        require_implementation(config, BufferedDatasetConfig)
         return cls(
             dataset_fn=dataset_fn,
             buffer_size=config.buffer_size,
@@ -352,14 +371,20 @@ class BufferedDataset(Iterable[T]):
         buffer: queue.Queue[Union[T, object]] = queue.Queue(maxsize=self.buffer_size)
 
         def _fill_buffer() -> None:
-            for sample in self.dataset_fn():
-                while True:
-                    try:
-                        buffer.put(sample, timeout=self.timeout)
-                    except queue.Full:
+            try:
+                if terminate.is_set():
+                    return
+                for sample in self.dataset_fn():
+                    while True:
                         if terminate.is_set():
                             return
-            buffer.put(sentinel)
+                        try:
+                            buffer.put(sample, timeout=self.timeout)
+                            break
+                        except queue.Full:
+                            continue
+            finally:
+                buffer.put(sentinel)
 
         thread = threading.Thread(target=_fill_buffer)
         thread.start()
@@ -369,33 +394,30 @@ class BufferedDataset(Iterable[T]):
                 if sample is sentinel:
                     break
                 yield sample  # type: ignore
-        finally:
+        except Exception:
+            terminate.set()
+            raise
+        else:
             terminate.set()
             thread.join()
 
 
 @runtime_checkable
-class CollatedDatasetConfig(Protocol):
-    batch_size: int
-    drop_last: bool
+class TruncateAndPadDatasetConfig(Protocol):
     sequence_length: int
     min_sequence_length: int
 
 
-class CollatedDataset(Iterable[Batch]):
+class TruncateAndPadDataset(Iterable[Sample]):
     def __init__(
         self,
         dataset: Iterable[Sample],
-        batch_size: int,
-        drop_last: bool,
         sequence_length: int,
         min_sequence_length: int,
         padding_value: int,
         input_key: str = "input_ids",
     ) -> None:
         self.dataset = dataset
-        self.batch_size = batch_size
-        self.drop_last = drop_last
         self.sequence_length = sequence_length
         self.min_sequence_length = min_sequence_length
         self.padding_value = padding_value
@@ -405,21 +427,19 @@ class CollatedDataset(Iterable[Batch]):
     def from_config(
         cls,
         dataset: Iterable[Sample],
-        config: CollatedDatasetConfig,
+        config: TruncateAndPadDatasetConfig,
         padding_value: int,
         input_key: str = "input_ids",
-    ) -> CollatedDataset:
+    ) -> TruncateAndPadDataset:
         return cls(
             dataset=dataset,
-            batch_size=config.batch_size,
-            drop_last=config.drop_last,
             sequence_length=config.sequence_length,
             min_sequence_length=config.min_sequence_length,
             padding_value=padding_value,
             input_key=input_key,
         )
 
-    def __iter__(self) -> Iterator[Batch]:
+    def __iter__(self) -> Iterator[Sample]:
         chunked_dataset = ChunkedDataset(
             dataset=self.dataset,
             chunk_size=self.sequence_length,
@@ -432,14 +452,7 @@ class CollatedDataset(Iterable[Batch]):
             padding_value=self.padding_value,
             input_key="chunks",
         )
-        batched_dataset = BatchedDataset(
-            dataset=padded_dataset,
-            batch_size=self.batch_size,
-        )
-        for batch in batched_dataset:
-            if self.drop_last and len(batch[self.input_key]) < self.batch_size:
-                continue
-            yield batch
+        yield from padded_dataset
 
 
 def load_tokenizer(path: Path) -> Tokenizer:
@@ -456,7 +469,7 @@ class TokenizerLoadingConfig(Protocol):
 
 def load_tokenizer_from_config(config: TokenizerLoadingConfig) -> Tokenizer:
     """Loads a tokenizer from a given config."""
-    assert isinstance(config, TokenizerLoadingConfig)
+    require_implementation(config, TokenizerLoadingConfig)
     return load_tokenizer(Path(config.path))
 
 
@@ -472,7 +485,7 @@ def train_tokenizer(
         f"Training tokenizer on {'all' if max_samples is None else max_samples} samples"
     )
     if max_samples is not None:
-        dataset = islice(dataset, max_samples)
+        dataset = islice(dataset, None, max_samples)
     tokenizer = SentencePieceBPETokenizer()  # type: ignore
     tokenizer.train_from_iterator(
         (sample[key] for sample in dataset),
@@ -507,7 +520,7 @@ def train_tokenizer_from_config(
     dataset: Iterable[Sample],
     config: TokenizerTrainingConfig,
 ) -> Tokenizer:
-    assert isinstance(config, TokenizerTrainingConfig)
+    require_implementation(config, TokenizerTrainingConfig)
     return train_tokenizer(
         dataset=dataset,
         vocabulary_size=config.vocabulary_size,
@@ -524,6 +537,7 @@ class SamplesConfig(Protocol):
     buffering: Optional[BufferedDatasetConfig]
     shuffle: Optional[ShuffledDatasetConfig]
     tokenizer: Optional[TokenizerLoadingConfig]
+    truncate_and_pad: Optional[TruncateAndPadDatasetConfig]
 
 
 def samples_from_config(
@@ -531,9 +545,10 @@ def samples_from_config(
     tokenize: bool = True,
     shuffle: bool = True,
     buffer: bool = True,
+    truncate_and_pad: bool = False,
     tokenizer: Optional[Tokenizer] = None,
 ) -> Iterable[Sample]:
-    assert isinstance(config, SamplesConfig)
+    require_implementation(config, SamplesConfig)
     if tokenize:
         if config.tokenizer is None:
             raise ValueError("Tokenizer config is missing")
@@ -544,6 +559,8 @@ def samples_from_config(
         raise ValueError("Shuffle config is missing")
     if buffer and config.buffering is None:
         raise ValueError("Buffering config is missing")
+    if truncate_and_pad and config.truncate_and_pad is None:
+        raise ValueError("Truncate and pad config is missing")
 
     def dataset_fn() -> Iterable[Sample]:
         dataset: Iterable[Sample]
@@ -553,6 +570,13 @@ def samples_from_config(
         if shuffle:
             assert config.shuffle is not None
             dataset = ShuffledDataset.from_config(dataset, config.shuffle)
+        if truncate_and_pad:
+            assert tokenizer is not None
+            pad_token_id = int(tokenizer.token_to_id(PAD_TOKEN))
+            assert config.truncate_and_pad is not None
+            dataset = TruncateAndPadDataset.from_config(
+                dataset, config.truncate_and_pad, pad_token_id
+            )
         return dataset
 
     dataset: Iterable[Sample]
@@ -562,30 +586,3 @@ def samples_from_config(
     else:
         dataset = dataset_fn()
     return dataset
-
-
-@runtime_checkable
-class BatchesConfig(SamplesConfig, Protocol):
-    collation: CollatedDatasetConfig
-    tokenizer: TokenizerLoadingConfig
-
-
-def batches_from_config(
-    config: Any,
-    shuffle: bool = True,
-    buffer: bool = True,
-) -> Iterable[Batch]:
-    assert isinstance(config, BatchesConfig)
-    tokenizer = load_tokenizer_from_config(config.tokenizer)
-    dataset = samples_from_config(
-        config=config,
-        tokenize=True,
-        shuffle=shuffle,
-        buffer=buffer,
-        tokenizer=tokenizer,
-    )
-    pad_token_id = int(tokenizer.token_to_id(PAD_TOKEN))
-    batched_dataset = CollatedDataset.from_config(
-        dataset, config.collation, padding_value=pad_token_id
-    )
-    return batched_dataset

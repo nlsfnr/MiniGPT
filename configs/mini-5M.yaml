@@ -1,0 +1,57 @@
+dataset:
+  huggingface:
+    args: [c4, en]
+    kwargs: {split: train}
+    streaming: true
+  buffering:
+    buffer_size: 1_000
+    timeout: 0.1
+  tokenizer:
+    path: ./tokenizers/c4-16k.json
+  shuffle:
+    buffer_size: 1_000
+    seed: 42
+  truncate_and_pad:
+    sequence_length: 129
+    min_sequence_length: 96
+
+tokenizer:
+  vocabulary_size: 16_384
+  min_token_frequency: 100
+  max_samples: 1_000_000
+  key: text
+  path: ./tokenizers/c4-16k.json
+
+model:
+  num_layers: 3
+  vocabulary_size: 16_384
+  embedding_dim: 128
+  model_dim: 256
+  num_heads: 8
+  hidden_dim: 1024
+  dropout: 0.0
+
+trainer:
+  batch_size: 32
+  batch_buffer_size: 2
+  save_frequency: 100
+  yield_frequency: 10
+  optimizer:
+    gradient_accumulation_steps: 1
+    lr_max: 0.006
+    lr_min: 0.0006
+    lr_decay_steps: null
+    lr_warmup_steps: 500
+    gradient_clip_norm: 1.0
+    adam_b1: 0.9
+    adam_b2: 0.995
+
+stream_logger:
+  frequency: 10
+
+wandb_logger:
+  histogram_frequency: 100
+  project: MiniGPT
+  group: Testing
+  tags: [Mini]
+

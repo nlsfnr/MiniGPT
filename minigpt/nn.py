@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import (Dict, List, Optional, Protocol, Tuple, Union,
-                    runtime_checkable)
+from typing import List, Optional, Protocol, Tuple, TypeVar, Union, runtime_checkable
 
 import haiku as hk
 import jax
@@ -10,10 +9,23 @@ import jax.numpy as jnp
 from chex import Array, ArrayTree, PRNGKey
 from einops import rearrange, repeat
 
+from .common import get_logger, require_implementation
+
+logger = get_logger()
+
 _DEFAULT_W_INIT = hk.initializers.VarianceScaling(0.01)
 
 
-Telemetry = Union[None, Array, List["Telemetry"], Dict[str, "Telemetry"]]
+Telemetry = Optional[ArrayTree]
+
+
+ArrayTreeT = TypeVar("ArrayTreeT", bound=Optional[ArrayTree])
+
+
+def to_cpu(x: ArrayTreeT) -> ArrayTreeT:
+    if x is None:
+        return x
+    return jax.device_put(x, jax.devices("cpu")[0])
 
 
 def rotary_pos_emb(
@@ -78,8 +90,8 @@ class MultiHeadAttention(hk.Module):
         y = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)
         o = o_proj(y)  # B L M
-        telemetry: Telemetry = (
-            dict(q=q, k=k, v=v, l=l, y=y, o=o) if collect_telemetry else None
+        telemetry: Telemetry = to_cpu(
+            dict(q=q, k=k, v=v, l=l, a=a, y=y, o=o) if collect_telemetry else None
         )
         return o, telemetry
 
@@ -107,7 +119,7 @@ class FeedForward(hk.Module):
         # PaLM-like SwiGLU
         h = jax.nn.silu(w1(x)) * w2(x)  # B L H
         y = w3(h)  # B L M
-        telemetry: Telemetry = dict(h=h, y=y) if collect_telemetry else None
+        telemetry: Telemetry = to_cpu(dict(h=h, y=y) if collect_telemetry else None)
         return y, telemetry
 
 
@@ -145,7 +157,7 @@ class Block(hk.Module):
         if is_training:
             z = hk.dropout(hk.next_rng_key(), self.dropout, z)
         out = x + z
-        telemetry: Telemetry = (
+        telemetry: Telemetry = to_cpu(
             dict(mha=mha_telemetry, ff=ff_telemetry, mha_out=y, ff_out=z, out=out)
             if collect_telemetry
             else None
@@ -187,6 +199,7 @@ class Model(hk.Module):
 
     @classmethod
     def from_config(cls, config: ModelConfig) -> Model:
+        require_implementation(config, ModelConfig)
         return cls(
             num_layers=config.num_layers,
             vocabulary_size=config.vocabulary_size,
@@ -226,7 +239,7 @@ class Model(hk.Module):
         ]
         out_ln = hk.LayerNorm(-1, True, False, name="out_ln")
         out_proj = hk.Linear(
-            self.vocabulary_size,
+            self.embedding_dim,
             with_bias=False,
             w_init=_DEFAULT_W_INIT,
             name="out_proj",
@@ -239,8 +252,8 @@ class Model(hk.Module):
             h, block_telemetry = block(h, is_training, collect_telemetry, mask)
             block_telemetries.append(block_telemetry)
         # Output
-        logits = out_proj(out_ln(h))
-        telemetry: Telemetry = (
+        logits = out_proj(out_ln(h)) @ embedding.embeddings.T
+        telemetry: Telemetry = to_cpu(  # type: ignore
             dict(embeddings=embeddings, logits=logits, blocks=block_telemetries)
             if collect_telemetry
             else None
@@ -253,7 +266,7 @@ class Model(hk.Module):
         config: ModelConfig,
         rng_or_seed: Union[int, PRNGKey],
     ) -> ArrayTree:
-        assert isinstance(config, ModelConfig)
+        require_implementation(config, ModelConfig)
 
         def fn() -> None:
             model = cls.from_config(config)
@@ -264,4 +277,8 @@ class Model(hk.Module):
             if isinstance(rng_or_seed, int)
             else rng_or_seed
         )
-        return hk.transform(fn).init(rng)
+        params = hk.transform(fn).init(rng)
+        params_n = hk.data_structures.tree_size(params)
+        params_mb = round(hk.data_structures.tree_bytes(params) / 1e6, 2)
+        logger.info(f"Model parameters: {params_n:,} ({params_mb:.2f} MB)")
+        return params

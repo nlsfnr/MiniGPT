@@ -1,7 +1,7 @@
 import string
 import time
 from itertools import tee
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Sequence
 
 import numpy as np
 import pytest
@@ -22,7 +22,7 @@ def gibberish(
     max_length: int = 1_000,
     temporal_jitter: float = 0.0,
     seed: int = 0,
-) -> Iterator[data.Sample]:
+) -> Iterable[data.Sample]:
     generator = np.random.default_rng(seed)
     while True:
         time.sleep(np.exp(generator.normal(0, 1.0)) * temporal_jitter)
@@ -116,3 +116,13 @@ def test_chunked_and_padded_dataset(
     for _ in range(1000):
         sample = next(samples)
         assert len(sample["input_ids"]) == 10
+
+
+def test_buffered_dataset() -> None:
+    buffered_dataset = data.BufferedDataset(gibberish, buffer_size=100)
+    samples = iter(buffered_dataset)
+    for _ in range(1000):
+        sample = next(samples)
+        assert isinstance(sample, dict)
+        assert "text" in sample
+        assert isinstance(sample["text"], str)

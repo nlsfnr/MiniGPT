@@ -3,5 +3,6 @@
 .venv/
 data/
 tokenizers/
+wandb/
 zoo/
 *.log

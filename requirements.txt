@@ -2,6 +2,10 @@
 dm-haiku
 chex==0.1.5
 einops
+optax
+
+# Remote logging
+wandb
 
 # Data
 datasets

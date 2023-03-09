@@ -1,0 +1,60 @@
+# Config to run a throughput test on the C4 dataset and the tokenizer in
+# ./tokenizers/c4-en-8192.json
+
+dataset:
+  huggingface:
+    args: [c4, en]
+    kwargs: {split: train}
+    streaming: true
+  buffering:
+    buffer_size: 10
+    timeout: 0.1
+  tokenizer:
+    path: ./tokenizers/testing.json
+  shuffle:
+    buffer_size: 10
+    seed: 42
+  truncate_and_pad:
+    sequence_length: 33
+    min_sequence_length: 24
+
+tokenizer:
+  vocabulary_size: 1_024
+  min_token_frequency: 1
+  max_samples: 100_000
+  key: text
+  path: ./tokenizers/testing.json
+
+model:
+  num_layers: 2
+  vocabulary_size: 1_024
+  embedding_dim: 16
+  model_dim: 64
+  num_heads: 2
+  hidden_dim: 128
+  dropout: 0.0
+
+trainer:
+  batch_size: 4
+  batch_buffer_size: 2
+  save_frequency: 100
+  yield_frequency: 10
+  optimizer:
+    gradient_accumulation_steps: 1
+    lr_max: 0.006
+    lr_min: 0.0006
+    lr_decay_steps: 10_000
+    lr_warmup_steps: 500
+    gradient_clip_norm: 1.0
+    adam_b1: 0.9
+    adam_b2: 0.95
+
+stream_logger:
+  frequency: 10
+
+wandb_logger:
+  histogram_frequency: 100
+  project: MiniGPT
+  group: Testing
+  tags: []
+

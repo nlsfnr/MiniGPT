@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TypeVar
 
+import jax
 import yaml
 
 _logger = logging.getLogger("MiniGPT")
 _DEFAULT_LOGFILE = Path.cwd() / "minigpt.log"
 
+T = TypeVar("T")
+
 
 def get_logger() -> logging.Logger:
     global _logger
     return _logger
+
+
+logger = get_logger()
 
 
 def setup_logging(
@@ -33,6 +39,14 @@ def setup_logging(
         file_handler = logging.FileHandler(logfile)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+
+
+def set_debug(debug: bool) -> None:
+    jax.config.update("jax_debug_nans", debug)
+    jax.config.update("jax_debug_infs", debug)
+    jax.config.update("jax_disable_jit", debug)
+    if debug:
+        logger.warn("Running in debug mode")
 
 
 class Config(Dict[str, Any]):
@@ -83,3 +97,17 @@ class Config(Dict[str, Any]):
     def to_yaml(self, path: Path) -> None:
         with open(path, "w") as fh:
             yaml.dump(self.to_dict(), fh)
+
+
+def require_implementation(
+    config: Any,
+    protocol: type,
+) -> None:
+    for attr in protocol.__annotations__:
+        # Check that the config has the required attribute. Notably, this does
+        # not check for types. The cast below is therefore not safe, but convenient.
+        if attr not in config:
+            raise KeyError(
+                f"Expected object with attribute: '{attr}' for {protocol.__name__}, "
+                f"got {config}"
+            )
