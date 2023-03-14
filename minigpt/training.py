@@ -86,8 +86,6 @@ def train(
     )
 
     for batch in batches:
-        # Get the next batch from the input queue
-        # Train on the batch
         rng_key, subkey = jax.random.split(rng_key)
         rv: _TrainStepRV = train_step(
             indices=batch,
@@ -99,12 +97,10 @@ def train(
         )
         params, opt_state, loss, model_telemetry, gradients = rv
         del model_telemetry, gradients  # TODO
-        # Send the training step event to the output queue
         yield TrainStep(
             step=step,
             loss=float(loss),
         )
-        # Sent the save event to the output queue if appropriate
         if save_directory is not None:
             assert save_frequency is not None
             if step % save_frequency == 0:
@@ -169,7 +165,7 @@ def _loss_fn(
     model = nn.Model.from_config(config)
     inputs = indices[:, :-1]
     seq_len = inputs.shape[1]
-    mask = jnp.triu(jnp.full((1, 1, seq_len, seq_len), -1e8))
+    mask = jnp.triu(jnp.full((1, 1, seq_len, seq_len), -1e8), k=1)
     logits, model_telemetry = model(
         inputs, is_training=True, collect_telemetry=with_model_telemetry, mask=mask
     )
