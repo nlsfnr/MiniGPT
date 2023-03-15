@@ -82,9 +82,9 @@ def save_to_directory(
             yield event
             continue
         path = Path(event.path)
-        path.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir) / "tmp-checkpoint"
+            tmpdir.mkdir(parents=True, exist_ok=True)
             event.config.to_yaml(tmpdir / "config.yaml")
             with open(tmpdir / "params.pkl", "wb") as f:
                 pickle.dump(event.params, f)
@@ -96,6 +96,7 @@ def save_to_directory(
                 f.write(str(event.step))
             with open(tmpdir / "seed.txt", "w") as f:
                 f.write(str(event.seed))
+            path.mkdir(parents=True, exist_ok=True)
             tmpdir.rename(path)
         logger.info(f"Step: {event.step:>6} | Saved model to {path}")
         yield event
