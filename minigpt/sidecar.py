@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Dict, Any
 import numpy as np
-import tempfile
 
 import optax
 from chex import ArrayTree, PRNGKey, Array
@@ -82,9 +81,9 @@ def save_to_directory(
             yield event
             continue
         path = Path(event.path)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir = Path(tmpdir) / "tmp-checkpoint"
-            tmpdir.mkdir(parents=True, exist_ok=True)
+        tmpdir = Path(".tmp-checkpoint/")
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        try:
             event.config.to_yaml(tmpdir / "config.yaml")
             with open(tmpdir / "params.pkl", "wb") as f:
                 pickle.dump(event.params, f)
@@ -98,6 +97,8 @@ def save_to_directory(
                 f.write(str(event.seed))
             path.mkdir(parents=True, exist_ok=True)
             tmpdir.rename(path)
+        finally:
+            tmpdir.rmdir()
         logger.info(f"Step: {event.step:>6} | Saved model to {path}")
         yield event
 
