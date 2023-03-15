@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Iterable, List, Mapping, Optional, Tuple, TypeVar, Union
+from typing import Callable, Optional, Union
 
 import haiku as hk
 import jax
@@ -11,19 +11,16 @@ from einops import rearrange, repeat
 
 from .common import Config, get_logger
 
-Telemetry = Union[None, Array, Iterable["Telemetry"], Mapping[str, "Telemetry"]]
-TelemetryT = TypeVar("TelemetryT", bound=Telemetry)
-
 _DEFAULT_W_INIT = hk.initializers.VarianceScaling(0.01)
 
 logger = get_logger()
 
 
-def to_cpu(t: TelemetryT) -> TelemetryT:
-    if t is None:
-        return t
-    cpu = jax.devices("cpu")[0]
-    return jax.tree_util.tree_map(lambda x: jax.device_put(x, device=cpu), t)
+def full_precision(fn: Callable[[Array], Array]) -> Callable[[Array], Array]:
+    def inner(x: Array) -> Array:
+        return fn(x.astype(jnp.float32)).astype(x.dtype)
+
+    return inner
 
 
 def rotary_pos_emb(
@@ -58,9 +55,8 @@ class MultiHeadAttention(hk.Module):
     def __call__(
         self,
         x: Array,
-        collect_telemetry: bool,
         mask: Optional[Array] = None,
-    ) -> Tuple[Array, Telemetry]:
+    ) -> Array:
         model_dim = x.shape[-1]
         key_size = model_dim // self.num_heads
         # Projections
@@ -81,15 +77,13 @@ class MultiHeadAttention(hk.Module):
         # Attention weights
         l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
         if mask is not None:
-            l = hk.remat(jnp.add)(l, mask)
-        a = jax.nn.softmax(l, axis=-1)  # B H L L
+            l = hk.remat(lambda x, m: jnp.where(m, x, -1e8))(l, mask)
+        a = full_precision(jax.nn.softmax)(l)  # B H L L
         # Attention output
         y = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)
         o = o_proj(y)  # B L M
-        if collect_telemetry:
-            return o, to_cpu(dict(q=q, k=k, v=v, l=l, a=a, y=y, o=o))
-        return o, None
+        return o
 
 
 class FeedForward(hk.Module):
@@ -104,8 +98,7 @@ class FeedForward(hk.Module):
     def __call__(
         self,
         x: Array,
-        collect_telemetry: bool,
-    ) -> Tuple[Array, Telemetry]:
+    ) -> Array:
         model_dim = x.shape[-1]
         # Projections
         projection = partial(hk.Linear, w_init=_DEFAULT_W_INIT, with_bias=False)
@@ -116,9 +109,7 @@ class FeedForward(hk.Module):
         a, b = w1(x), w2(x)
         h = hk.remat(lambda a_, b_: jax.nn.silu(a_) * b_)(a, b)
         y = w3(h)  # B L M
-        if collect_telemetry:
-            return y, to_cpu(dict(h=h, y=y))
-        return y, None
+        return y
 
 
 class Block(hk.Module):
@@ -138,29 +129,23 @@ class Block(hk.Module):
         self,
         x: Array,
         is_training: bool,
-        collect_telemetry: bool,
         mask: Optional[Array] = None,
-    ) -> Tuple[Array, Telemetry]:
+    ) -> Array:
         mha = MultiHeadAttention(self.num_heads, name="mha")
         mha_ln = hk.remat(hk.LayerNorm(-1, True, False, name="mha_ln"))
         ff = FeedForward(self.hidden_dim, name="ff")
         ff_ln = hk.remat(hk.LayerNorm(-1, True, False, name="ff_ln"))
         # Multi-head attention
-        y, mha_telemetry = mha(mha_ln(x), collect_telemetry, mask)
+        y = mha(mha_ln(x), mask)
         if is_training:
             y = hk.dropout(hk.next_rng_key(), self.dropout, y)
         x = x + y
         # Feed-forward
-        z, ff_telemetry = ff(ff_ln(x), collect_telemetry)
+        z = ff(ff_ln(x))
         if is_training:
             z = hk.dropout(hk.next_rng_key(), self.dropout, z)
         out = x + z
-        if collect_telemetry:
-            telemetry = to_cpu(
-                dict(mha=mha_telemetry, ff=ff_telemetry, mha_out=y, ff_out=z, out=out)
-            )
-            return out, telemetry
-        return out, None
+        return out
 
 
 class Model(hk.Module):
@@ -201,9 +186,8 @@ class Model(hk.Module):
         self,
         indices: Array,
         is_training: bool,
-        collect_telemetry: bool,
         mask: Optional[Array] = None,
-    ) -> Tuple[Array, Telemetry]:
+    ) -> Array:
         embedding = hk.Embed(
             self.vocabulary_size,
             self.embedding_dim,
@@ -234,19 +218,12 @@ class Model(hk.Module):
         # Execution
         embeddings = embedding(indices)
         h = embedding_proj(embeddings) if embedding_proj is not None else embeddings
-        block_telemetries: List[Telemetry] = []
         for block in blocks:
-            h, block_telemetry = block(h, is_training, collect_telemetry, mask)
-            block_telemetries.append(block_telemetry)
+            h = block(h, is_training, mask)
         # Output
         final_hidden = out_proj(out_ln(h))
         logits = jnp.einsum("b s m, v m -> b s v", final_hidden, embedding.embeddings)
-        if collect_telemetry:
-            telemetry = to_cpu(
-                dict(embeddings=embeddings, logits=logits, blocks=block_telemetries)
-            )
-            return logits, telemetry
-        return logits, None
+        return logits
 
     @classmethod
     def get_params(
@@ -257,7 +234,7 @@ class Model(hk.Module):
     ) -> ArrayTree:
         def fn() -> None:
             model = cls.from_config(config)
-            model(jnp.zeros((1, 1), dtype=jnp.int32), False, False)
+            model(jnp.zeros((1, 1), dtype=jnp.int32), False)
 
         rng = (
             jax.random.PRNGKey(rng_or_seed)

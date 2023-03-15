@@ -10,7 +10,7 @@ data:
   length: 32
   min_length: 24
   pad_token_id: 0
-  batch_size: 128
+  batch_size: 32
   shuffle_buffer_size: 10_000
 
 model:
@@ -32,3 +32,8 @@ optimizer:
   gradient_clip_norm: 1.0
   adam_b1: 0.9
   adam_b2: 0.995
+
+mixed_precision:
+  enable: true
+  initial_scale_log2: 10
+  scale_period: 1000

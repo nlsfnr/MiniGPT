@@ -3,6 +3,7 @@ dm-haiku
 chex==0.1.5
 einops
 optax
+jmp
 
 # Remote logging
 wandb

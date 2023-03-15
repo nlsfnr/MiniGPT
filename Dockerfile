@@ -1,13 +1,17 @@
 FROM nvidia/cuda:11.7.1-cudnn8-devel-ubuntu22.04
 
 RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:flexiondotorg/nvtop && \
+    apt-get update && \
     apt-get install -y build-essential \
                        libssl-dev \
                        libffi-dev \
                        python3-dev \
                        python3-pip \
                        git \
-                       vim
+                       vim \
+                       nvtop
 
 ENV PYTHONDONTWRITEBYTECODE=1
 RUN git config --global --add safe.directory /workdir

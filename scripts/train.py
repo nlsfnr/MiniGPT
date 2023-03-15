@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import sys
 from functools import partial
+from itertools import islice
 from pathlib import Path
 from pprint import pformat
 from typing import Optional, Tuple
-from itertools import islice
 
 import click
 import optax
@@ -113,7 +113,9 @@ def train_new(
     else:
         raise ValueError("Must specify either config-path or load-from")
 
-    batches_fn = lambda: islice(minigpt.batches_from_config(config, seed + 1), step, None)
+    batches_fn = lambda: islice(
+        minigpt.batches_from_config(config, seed + 1), step, None
+    )
     with minigpt.BufferedIterator(batches_fn, data_buffer) as batches:
         train_fn = partial(
             minigpt.train,

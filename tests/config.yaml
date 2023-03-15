@@ -32,3 +32,8 @@ optimizer:
   gradient_clip_norm: 1.0
   adam_b1: 0.9
   adam_b2: 0.995
+
+mixed_precision:
+  enable: true
+  initial_scale_log2: 10
+  scale_period: 1000

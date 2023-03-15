@@ -47,7 +47,7 @@ class BufferedIterator(threading.Thread, Generic[T]):
             pass
         except Exception as e:
             self._exception = e
-        finally:
+        else:
             self._queue.put(_END_OF_QUEUE)
 
     def join(self, timeout: Optional[float] = None) -> None:

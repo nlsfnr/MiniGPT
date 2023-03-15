@@ -10,6 +10,7 @@ from typing import Iterable, NamedTuple, Optional, Tuple, TypeVar, Union
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import jmp
 import numpy as np
 import optax
 from chex import Array, ArrayTree, PRNGKey
@@ -30,6 +31,7 @@ class Event:
 class TrainStep(Event):
     step: int
     loss: float
+    gradients_finite: bool
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -39,6 +41,7 @@ class Save(Event):
     step: int
     config: Config
     params: ArrayTree
+    loss_scale: jmp.LossScale
     opt_state: optax.MultiStepsState
     rng_key: PRNGKey
     seed: int
@@ -58,6 +61,7 @@ def train(
     rng_key: Optional[PRNGKey] = None,
     params: Optional[ArrayTree] = None,
     opt_state: Optional[optax.MultiStepsState] = None,
+    loss_scale: Optional[jmp.LossScale] = None,
     step: Optional[int] = None,
     batches: Optional[Union[Iterable[Array], Iterable[np.ndarray]]] = None,
     save_frequency: Optional[int] = None,
@@ -72,9 +76,12 @@ def train(
         opt_state = _get_optimizer(config).init(params)
     if step is None:
         step = 0
+    if loss_scale is None:
+        loss_scale = _get_loss_scale(config, step)
     if batches is None:
         batches = islice(data.batches_from_config(config, seed + 2), step, None)
-    batches = map(jnp.asarray, batches)
+    batches = map(partial(jnp.asarray, dtype=jnp.int32), batches)
+    _set_amp_policy(config)
     assert params is not None
     assert opt_state is not None
     assert rng_key is not None
@@ -82,7 +89,7 @@ def train(
     assert batches is not None
     train_step = jax.jit(
         partial(_train_step, config=config),
-        static_argnames=["with_model_telemetry", "with_gradients"],
+        static_argnames=["with_gradients"],
     )
 
     for batch in batches:
@@ -91,25 +98,34 @@ def train(
             indices=batch,
             params=params,
             opt_state=opt_state,
+            loss_scale=loss_scale,
             rng_key=subkey,
-            with_model_telemetry=False,
             with_gradients=False,
         )
-        params, opt_state, loss, model_telemetry, gradients = rv
-        del model_telemetry, gradients  # TODO
+        (
+            params,
+            opt_state,
+            loss_scale,
+            loss,
+            gradients,
+            gradients_finite,
+        ) = rv
+        del gradients  # TODO
         yield TrainStep(
             step=step,
             loss=float(loss),
+            gradients_finite=bool(gradients_finite),
         )
         if save_directory is not None:
             assert save_frequency is not None
             if step % save_frequency == 0:
                 yield Save(
-                    path=save_directory / f"step_{step:06d}/",
+                    path=save_directory,
                     step=step,
                     config=config,
                     params=to_cpu(params),
                     opt_state=to_cpu(opt_state),
+                    loss_scale=to_cpu(loss_scale),
                     rng_key=to_cpu(rng_key),
                     seed=seed,
                 )
@@ -119,9 +135,10 @@ def train(
 class _TrainStepRV(NamedTuple):
     params: ArrayTree
     opt_state: optax.MultiStepsState
+    loss_scale: jmp.LossScale
     loss: Array
-    model_telemetry: nn.Telemetry
     gradients: Optional[ArrayTree]
+    gradients_finite: Array
 
 
 def _train_step(
@@ -129,50 +146,55 @@ def _train_step(
     indices: Array,
     params: ArrayTree,
     opt_state: optax.MultiStepsState,
+    loss_scale: jmp.LossScale,
     rng_key: PRNGKey,
     config: Config,
-    with_model_telemetry: bool,
     with_gradients: bool,
 ) -> _TrainStepRV:
     loss_fn = hk.transform(
-        partial(_loss_fn, with_model_telemetry=with_model_telemetry, config=config)
+        partial(_loss_fn, config=config)
     ).apply
     grad_fn = jax.grad(loss_fn, has_aux=True)
     optimizer = _get_optimizer(config)
-    gradients, loss_aux = grad_fn(params, rng_key, indices=indices)
-    updates, opt_state = optimizer.update(gradients, opt_state, params)
-    params = optax.apply_updates(params, updates)
+    gradients, loss_aux = grad_fn(
+        params, rng_key, indices=indices, loss_scale=loss_scale
+    )
+    gradients = loss_scale.unscale(gradients)
+    gradients_finite = jmp.all_finite(gradients)
+    updates, new_opt_state = optimizer.update(gradients, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    opt_state, params = jmp.select_tree(
+        gradients_finite, (new_opt_state, new_params), (opt_state, params)
+    )
     return _TrainStepRV(
         params=params,
         opt_state=opt_state,
+        loss_scale=loss_scale,
         loss=loss_aux.loss,
-        model_telemetry=loss_aux.model_telemetry,
         gradients=gradients if with_gradients else None,
+        gradients_finite=gradients_finite,
     )
 
 
 class _LossFnAux(NamedTuple):
     loss: Array
-    model_telemetry: nn.Telemetry
 
 
 def _loss_fn(
     *,
     indices: Array,
+    loss_scale: jmp.LossScale,
     config: Config,
-    with_model_telemetry: bool,
 ) -> Tuple[Array, _LossFnAux]:
     model = nn.Model.from_config(config)
     inputs = indices[:, :-1]
     seq_len = inputs.shape[1]
-    mask = jnp.triu(jnp.full((1, 1, seq_len, seq_len), -1e8), k=1)
-    logits, model_telemetry = model(
-        inputs, is_training=True, collect_telemetry=with_model_telemetry, mask=mask
-    )
+    mask = jnp.triu(jnp.full((1, 1, seq_len, seq_len), False, dtype=bool), k=1)
+    logits = model(inputs, is_training=True, mask=mask)
     loss = jnp.mean(
         optax.softmax_cross_entropy_with_integer_labels(logits, indices[:, 1:])
     )
-    return loss, _LossFnAux(loss=loss, model_telemetry=model_telemetry)
+    return loss_scale.scale(loss), _LossFnAux(loss=loss)
 
 
 def _get_optimizer(
@@ -205,3 +227,31 @@ def _get_optimizer(
         optax.scale_by_schedule(lr_schedule),
     )
     return optax.MultiSteps(optimizer, cfg.gradient_accumulation_steps)
+
+
+def _get_loss_scale(
+    config: Config,
+    step: int,
+) -> jmp.LossScale:
+    if not config.mixed_precision.enable:
+        return jmp.NoOpLossScale()
+    return jmp.DynamicLossScale(
+        loss_scale=jnp.asarray(
+            2**config.mixed_precision.initial_scale_log2, dtype=jnp.float32
+        ),
+        counter=jnp.asarray(step, dtype=jnp.int32),
+        period=config.mixed_precision.scale_period,
+    )
+
+
+def _set_amp_policy(config: Config) -> jmp.Policy:
+    """Get and set the policy for mixed precision training."""
+    full = jnp.dtype(jnp.float32)
+    half = jnp.dtype(jnp.float16 if config.mixed_precision.enable else jnp.float32)
+    half_policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=half)
+    full_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=full)
+    hk.mixed_precision.set_policy(nn.Model, full_policy)
+    hk.mixed_precision.set_policy(nn.Block, half_policy)
+    hk.mixed_precision.set_policy(hk.Linear, half_policy)
+    hk.mixed_precision.set_policy(hk.LayerNorm, full_policy)
+    return half_policy
