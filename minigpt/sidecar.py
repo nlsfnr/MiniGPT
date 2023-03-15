@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Dict, Any
 import numpy as np
+import shutil
 
 import optax
 from chex import ArrayTree, PRNGKey, Array
@@ -98,7 +99,7 @@ def save_to_directory(
             path.mkdir(parents=True, exist_ok=True)
             tmpdir.rename(path)
         finally:
-            tmpdir.rmdir()
+            shutil.rmtree(tmpdir)
         logger.info(f"Step: {event.step:>6} | Saved model to {path}")
         yield event
 
