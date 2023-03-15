@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Dict, Any
 import numpy as np
-import tmpfile
+import tempfile
 
 import optax
 from chex import ArrayTree, PRNGKey, Array
@@ -83,7 +83,7 @@ def save_to_directory(
             continue
         path = Path(event.path)
         path.mkdir(parents=True, exist_ok=True)
-        with tmpfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir = Path(tmpdir) / "tmp-checkpoint"
             event.config.to_yaml(tmpdir / "config.yaml")
             with open(tmpdir / "params.pkl", "wb") as f:

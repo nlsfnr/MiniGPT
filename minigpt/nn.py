@@ -60,13 +60,13 @@ class MultiHeadAttention(hk.Module):
         model_dim = x.shape[-1]
         key_size = model_dim // self.num_heads
         # Projections
-        projection = partial(hk.Linear, w_init=_DEFAULT_W_INIT, with_bias=False)
+        projection = partial(hk.Linear, with_bias=False)
         q_proj = projection(key_size * self.num_heads, name="q_proj")
         k_proj = projection(key_size * self.num_heads, name="k_proj")
         v_proj = projection(key_size * self.num_heads, name="v_proj")
         o_proj = projection(model_dim, name="o_proj")
         # Q, K, V
-        q = q_proj(x) / x.shape[-1] ** 0.5  # B L H K
+        q = q_proj(x) / key_size ** 0.5  # B L H K
         q = rearrange(q, "b l (h k) -> b h l k", h=self.num_heads)
         q = rotary_pos_emb(q)
         k = k_proj(x)  # B L H K
@@ -76,9 +76,13 @@ class MultiHeadAttention(hk.Module):
         v = rearrange(v, "b l (h v) -> b h l v", h=self.num_heads)
         # Attention weights
         l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
-        if mask is not None:
-            l = hk.remat(lambda x, m: jnp.where(m, x, -1e8))(l, mask)
-        a = full_precision(jax.nn.softmax)(l)  # B H L L
+
+        def _logits_to_weights(l_: Array) -> Array:
+            if mask is not None:
+                l_ = hk.remat(jnp.where)(l_, mask, -1e8)
+            return jax.nn.softmax(l_)  # B H L L
+
+        a = full_precision(_logits_to_weights)(l)  # B H L L
         # Attention output
         y = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)
@@ -101,7 +105,7 @@ class FeedForward(hk.Module):
     ) -> Array:
         model_dim = x.shape[-1]
         # Projections
-        projection = partial(hk.Linear, w_init=_DEFAULT_W_INIT, with_bias=False)
+        projection = partial(hk.Linear, with_bias=False)
         w1 = projection(self.hidden_dim, name="w1")
         w2 = projection(self.hidden_dim, name="w2")
         w3 = projection(model_dim, name="w3")
@@ -197,7 +201,6 @@ class Model(hk.Module):
         embedding_proj = (
             hk.Linear(
                 self.model_dim,
-                w_init=_DEFAULT_W_INIT,
                 with_bias=False,
                 name="embedding_proj",
             )
