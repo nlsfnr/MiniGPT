@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Dict, Any
 import numpy as np
 import shutil
+import os
 
 import optax
 from chex import ArrayTree, PRNGKey, Array
@@ -96,10 +97,13 @@ def save_to_directory(
                 f.write(str(event.step))
             with open(tmpdir / "seed.txt", "w") as f:
                 f.write(str(event.seed))
-            path.mkdir(parents=True, exist_ok=True)
-            tmpdir.rename(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                shutil.rmtree(path)
+            os.rename(tmpdir, path)
         finally:
-            shutil.rmtree(tmpdir)
+            if tmpdir.exists():
+                shutil.rmtree(tmpdir)
         logger.info(f"Step: {event.step:>6} | Saved model to {path}")
         yield event
 
