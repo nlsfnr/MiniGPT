@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Dict, Any
 import numpy as np
+import tmpfile
 
 import optax
 from chex import ArrayTree, PRNGKey, Array
@@ -82,17 +83,20 @@ def save_to_directory(
             continue
         path = Path(event.path)
         path.mkdir(parents=True, exist_ok=True)
-        event.config.to_yaml(path / "config.yaml")
-        with open(path / "params.pkl", "wb") as f:
-            pickle.dump(event.params, f)
-        with open(path / "opt_state.pkl", "wb") as f:
-            pickle.dump(event.opt_state, f)
-        with open(path / "rng_key.pkl", "wb") as f:
-            pickle.dump(event.rng_key, f)
-        with open(path / "step.txt", "w") as f:
-            f.write(str(event.step))
-        with open(path / "seed.txt", "w") as f:
-            f.write(str(event.seed))
+        with tmpfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir) / "tmp-checkpoint"
+            event.config.to_yaml(tmpdir / "config.yaml")
+            with open(tmpdir / "params.pkl", "wb") as f:
+                pickle.dump(event.params, f)
+            with open(tmpdir / "opt_state.pkl", "wb") as f:
+                pickle.dump(event.opt_state, f)
+            with open(tmpdir / "rng_key.pkl", "wb") as f:
+                pickle.dump(event.rng_key, f)
+            with open(tmpdir / "step.txt", "w") as f:
+                f.write(str(event.step))
+            with open(tmpdir / "seed.txt", "w") as f:
+                f.write(str(event.seed))
+            tmpdir.rename(path)
         logger.info(f"Step: {event.step:>6} | Saved model to {path}")
         yield event
 
