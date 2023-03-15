@@ -149,6 +149,9 @@ def log_to_wandb(
             if event.gradients is not None:
                 tuples = _to_histograms(event.gradients, "/")
                 data["gradients"] = dict(tuples)
+            if event.params is not None:
+                tuples = _to_histograms(event.params, "/")
+                data["params"] = dict(tuples)
             run.log(data, step=event.step)
         yield event
 

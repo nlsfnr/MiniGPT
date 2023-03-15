@@ -35,6 +35,7 @@ class TrainStep(Event):
     loss: float
     gradients_finite: bool
     gradients: Optional[ArrayTree] = None
+    params: Optional[ArrayTree] = None
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -70,6 +71,7 @@ def train(
     save_frequency: Optional[int] = None,
     save_directory: Optional[Path] = None,
     log_gradients_frequency: Optional[int] = None,
+    log_params_frequency: Optional[int] = None,
     log_param_size_on_init: bool = True,
 ) -> Iterable[Event]:
     if rng_key is None:
@@ -127,16 +129,18 @@ def train(
             gradients,
             gradients_finite,
         ) = rv
+        log_params = log_params_frequency is not None and step % log_params_frequency == 0
+        gffd = _get_from_first_device
         yield TrainStep(
             step=step,
             loss=float(loss),
             gradients=to_cpu(gradients) if gradients is not None else None,
+            params=to_cpu(gffd(params)) if log_params else None,
             gradients_finite=bool(gradients_finite),
         )
         if save_directory is not None:
             assert save_frequency is not None
             if step % save_frequency == 0:
-                gffd = _get_from_first_device
                 yield Save(
                     path=save_directory,
                     step=step,
