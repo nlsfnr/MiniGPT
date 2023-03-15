@@ -45,12 +45,14 @@ def cli(
 @click.option("--log-time-per-step-percentiles", "-tp", type=int, multiple=True,
               default=(1, 50, 99), help="Percentiles to log for time per step. Default "
               "(1, 50, 99).")
+@click.option("--log-gradients-frequency", "-gf", type=int, default=100,
+              help="Log frequency for gradients. Default 100.")
 @click.option("--wandb-disable", "-wd", is_flag=True,
               help="Disable wandb.")
 @click.option("--wandb-project", "-wp", type=str, default="MiniGPT",
               help="Wandb project name. Default MiniGPT.")
-@click.option("--wandb-group", "-wg", type=str, default=None,
-              help="Wandb group name. Default None.")
+@click.option("--wandb-group", "-wg", type=str, default="default",
+              help="Wandb group name. Default default.")
 @click.option("--wandb-name", "-wn", type=str, default=None,
               help="Wandb run name. Default None.")
 @click.option("--wandb-tags", "-wt", type=str, multiple=True, default=[],
@@ -69,6 +71,7 @@ def train_new(
     log_frequency: int,
     log_time_per_step_frequency: int,
     log_time_per_step_percentiles: Tuple[int, ...],
+    log_gradients_frequency: int,
     wandb_disable: bool,
     wandb_project: Optional[str],
     wandb_group: Optional[str],
@@ -128,6 +131,7 @@ def train_new(
             step=step,
             save_frequency=save_frequency,
             save_directory=save_directory,
+            log_gradients_frequency=log_gradients_frequency,
         )
         with minigpt.BufferedIterator(train_fn, event_buffer) as events:
             events = minigpt.log_losses(events=events, frequency=log_frequency)

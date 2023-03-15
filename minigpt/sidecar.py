@@ -2,10 +2,11 @@ import pickle
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Optional, Tuple, Dict, Any
+import numpy as np
 
 import optax
-from chex import ArrayTree, PRNGKey
+from chex import ArrayTree, PRNGKey, Array
 from wandb.sdk.wandb_run import Run as WandbRun
 
 import wandb
@@ -144,7 +145,10 @@ def log_to_wandb(
             with open(event.path / "wandb-run-id.txt", "w") as f:
                 f.write(run.id)
         elif isinstance(event, TrainStep):
-            data = dict(loss=event.loss)
+            data: Dict[str, Any] = dict(loss=event.loss)
+            if event.gradients is not None:
+                tuples = _to_histograms(event.gradients, "/")
+                data["gradients"] = dict(tuples)
             run.log(data, step=event.step)
         yield event
 
@@ -155,7 +159,7 @@ def load_wandb_run(
 ) -> WandbRun:
     with open(path / "wandb-run-id.txt") as f:
         run_id = f.read().strip()
-    run = wandb.init(id=run_id, resume="must")
+    run = wandb.init(id=run_id, resume="allow")
     assert isinstance(run, WandbRun)
     return run
 
@@ -177,3 +181,24 @@ def new_wandb_run(
     )
     assert isinstance(run, WandbRun)
     return run
+
+
+def _to_histograms(
+    x: ArrayTree,
+    prefix: str = "",
+    bins: int = 64,
+) -> Iterable[Tuple[str, wandb.Histogram]]:
+    if isinstance(x, (np.ndarray, Array)):
+        x = np.asarray(x)
+        x = x.flatten()
+        hist = np.histogram(x, bins=bins)
+        yield prefix, wandb.Histogram(np_histogram=hist)
+    elif isinstance(x, dict):
+        for key, value in x.items():
+            key = str(key).replace("/", ".").replace(" ", "_")
+            yield from _to_histograms(value, prefix=f"{prefix}.{key}", bins=bins)
+    elif isinstance(x, Iterable):
+        for i, value in enumerate(x):
+            yield from _to_histograms(value, prefix=f"{prefix}.{i}", bins=bins)
+    else:
+        raise TypeError(f"Expected x to be an array dict or iterable, got {type(x)}")

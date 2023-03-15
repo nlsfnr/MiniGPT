@@ -14,6 +14,7 @@ import jmp
 import numpy as np
 import optax
 from chex import Array, ArrayTree, PRNGKey
+from einops import rearrange
 
 from . import data, nn
 from .common import Config, get_logger
@@ -21,6 +22,7 @@ from .common import Config, get_logger
 logger = get_logger()
 
 ArrayTreeT = TypeVar("ArrayTreeT", bound=ArrayTree)
+T = TypeVar("T")
 
 
 class Event:
@@ -32,6 +34,7 @@ class TrainStep(Event):
     step: int
     loss: float
     gradients_finite: bool
+    gradients: Optional[ArrayTree] = None
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -66,6 +69,7 @@ def train(
     batches: Optional[Union[Iterable[Array], Iterable[np.ndarray]]] = None,
     save_frequency: Optional[int] = None,
     save_directory: Optional[Path] = None,
+    log_gradients_frequency: Optional[int] = None,
     log_param_size_on_init: bool = True,
 ) -> Iterable[Event]:
     if rng_key is None:
@@ -81,26 +85,39 @@ def train(
     if batches is None:
         batches = islice(data.batches_from_config(config, seed + 2), step, None)
     batches = map(partial(jnp.asarray, dtype=jnp.int32), batches)
-    _set_amp_policy(config)
+    policy = _set_amp_policy(config)
     assert params is not None
     assert opt_state is not None
     assert rng_key is not None
     assert step is not None
     assert batches is not None
-    train_step = jax.jit(
-        partial(_train_step, config=config),
-        static_argnames=["with_gradients"],
+    device_count = jax.device_count()
+    params = _broadcast_to_devices(params)
+    opt_state = _broadcast_to_devices(opt_state)
+    loss_scale = _broadcast_to_devices(loss_scale)
+
+    train_step_with_gradients = jax.pmap(
+        partial(_train_step, config=config, axis_name="device", with_gradients=True),
+        axis_name="device",
+    )
+    train_step_without_gradients = jax.pmap(
+        partial(_train_step, config=config, axis_name="device", with_gradients=False),
+        axis_name="device",
     )
 
     for batch in batches:
         rng_key, subkey = jax.random.split(rng_key)
+        subkeys = jax.random.split(subkey, num=device_count)
+        batch = policy.cast_to_compute(batch)
+        batch = rearrange(batch, '(d b) ... -> d b ...', d=device_count)
+        with_gradients = log_gradients_frequency is not None and step % log_gradients_frequency == 0
+        train_step = train_step_with_gradients if with_gradients else train_step_without_gradients
         rv: _TrainStepRV = train_step(
             indices=batch,
             params=params,
             opt_state=opt_state,
             loss_scale=loss_scale,
-            rng_key=subkey,
-            with_gradients=False,
+            rng_key=subkeys,
         )
         (
             params,
@@ -110,22 +127,23 @@ def train(
             gradients,
             gradients_finite,
         ) = rv
-        del gradients  # TODO
         yield TrainStep(
             step=step,
             loss=float(loss),
+            gradients=to_cpu(gradients) if gradients is not None else None,
             gradients_finite=bool(gradients_finite),
         )
         if save_directory is not None:
             assert save_frequency is not None
             if step % save_frequency == 0:
+                gffd = _get_from_first_device
                 yield Save(
                     path=save_directory,
                     step=step,
                     config=config,
-                    params=to_cpu(params),
-                    opt_state=to_cpu(opt_state),
-                    loss_scale=to_cpu(loss_scale),
+                    params=to_cpu(gffd(params)),
+                    opt_state=to_cpu(gffd(opt_state)),
+                    loss_scale=to_cpu(gffd(loss_scale)),
                     rng_key=to_cpu(rng_key),
                     seed=seed,
                 )
@@ -149,6 +167,7 @@ def _train_step(
     loss_scale: jmp.LossScale,
     rng_key: PRNGKey,
     config: Config,
+    axis_name: str,
     with_gradients: bool,
 ) -> _TrainStepRV:
     loss_fn = hk.transform(
@@ -159,6 +178,7 @@ def _train_step(
     gradients, loss_aux = grad_fn(
         params, rng_key, indices=indices, loss_scale=loss_scale
     )
+    gradients = jax.lax.pmean(gradients, axis_name=axis_name)
     gradients = loss_scale.unscale(gradients)
     gradients_finite = jmp.all_finite(gradients)
     updates, new_opt_state = optimizer.update(gradients, opt_state, params)
@@ -255,3 +275,23 @@ def _set_amp_policy(config: Config) -> jmp.Policy:
     hk.mixed_precision.set_policy(hk.Linear, half_policy)
     hk.mixed_precision.set_policy(hk.LayerNorm, full_policy)
     return half_policy
+
+
+def _broadcast_to_devices(obj: T) -> T:
+    device_count = jax.device_count()
+    fn = lambda x: (jnp.broadcast_to(x, (device_count, *x.shape))
+                    if isinstance(x, Array) else
+                    x)
+    return jax.tree_util.tree_map(fn, obj)
+
+
+def _get_from_first_device(obj: T) -> T:
+    fn = lambda x: x[0] if isinstance(x, Array) else x
+    return jax.tree_util.tree_map(fn, obj)
+
+
+def _concat_from_devices(obj: T) -> T:
+    fn = lambda x: rearrange(x, 'd b ... -> (d b) ...') if isinstance(x, Array) else x
+    return jax.tree_util.tree_map(fn, obj)
+
+
