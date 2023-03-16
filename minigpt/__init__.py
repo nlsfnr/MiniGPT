@@ -9,6 +9,7 @@ from .sidecar import (
     log_to_wandb,
     new_wandb_run,
     save_to_directory,
+    detect_anomalies,
 )
 from .threading_utils import BufferedIterator
 from .training import Event, TrainStep, train
@@ -20,6 +21,7 @@ __all__ = (
     "Model",
     "TrainStep",
     "batches_from_config",
+    "detect_anomalies",
     "get_logger",
     "load_from_directory",
     "load_wandb_run",

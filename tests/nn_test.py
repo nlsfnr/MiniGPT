@@ -24,6 +24,7 @@ def test_model() -> None:
             embedding_dim=32,
             model_dim=64,
             num_heads=4,
+            pos_emb_portion=0.5,
             hidden_dim=256,
             dropout=0.1,
         )

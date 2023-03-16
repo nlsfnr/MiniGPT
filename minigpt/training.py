@@ -111,9 +111,15 @@ def train(
         rng_key, subkey = jax.random.split(rng_key)
         subkeys = jax.random.split(subkey, num=device_count)
         batch = policy.cast_to_compute(batch)
-        batch = rearrange(batch, '(d b) ... -> d b ...', d=device_count)
-        with_gradients = log_gradients_frequency is not None and step % log_gradients_frequency == 0
-        train_step = train_step_with_gradients if with_gradients else train_step_without_gradients
+        batch = rearrange(batch, "(d b) ... -> d b ...", d=device_count)
+        with_gradients = (
+            log_gradients_frequency is not None and step % log_gradients_frequency == 0
+        )
+        train_step = (
+            train_step_with_gradients
+            if with_gradients
+            else train_step_without_gradients
+        )
         rv: _TrainStepRV = train_step(
             indices=batch,
             params=params,
@@ -129,7 +135,9 @@ def train(
             gradients,
             gradients_finite,
         ) = rv
-        log_params = log_params_frequency is not None and step % log_params_frequency == 0
+        log_params = (
+            log_params_frequency is not None and step % log_params_frequency == 0
+        )
         gffd = _get_from_first_device
         yield TrainStep(
             step=step,
@@ -174,9 +182,7 @@ def _train_step(
     axis_name: str,
     with_gradients: bool,
 ) -> _TrainStepRV:
-    loss_fn = hk.transform(
-        partial(_loss_fn, config=config)
-    ).apply
+    loss_fn = hk.transform(partial(_loss_fn, config=config)).apply
     grad_fn = jax.grad(loss_fn, has_aux=True)
     optimizer = _get_optimizer(config)
     gradients, loss_aux = grad_fn(
@@ -213,7 +219,7 @@ def _loss_fn(
     model = nn.Model.from_config(config)
     inputs = indices[:, :-1]
     seq_len = inputs.shape[1]
-    mask = jnp.triu(jnp.full((1, 1, seq_len, seq_len), False, dtype=bool), k=1)
+    mask = jnp.tril(jnp.full((1, 1, seq_len, seq_len), True, dtype=bool))
     logits = model(inputs, is_training=True, mask=mask)
     loss = jnp.mean(
         optax.softmax_cross_entropy_with_integer_labels(logits, indices[:, 1:])
@@ -283,9 +289,9 @@ def _set_amp_policy(config: Config) -> jmp.Policy:
 
 def _broadcast_to_devices(obj: T) -> T:
     device_count = jax.device_count()
-    fn = lambda x: (jnp.broadcast_to(x, (device_count, *x.shape))
-                    if isinstance(x, Array) else
-                    x)
+    fn = lambda x: (
+        jnp.broadcast_to(x, (device_count, *x.shape)) if isinstance(x, Array) else x
+    )
     return jax.tree_util.tree_map(fn, obj)
 
 
@@ -295,7 +301,5 @@ def _get_from_first_device(obj: T) -> T:
 
 
 def _concat_from_devices(obj: T) -> T:
-    fn = lambda x: rearrange(x, 'd b ... -> (d b) ...') if isinstance(x, Array) else x
+    fn = lambda x: rearrange(x, "d b ... -> (d b) ...") if isinstance(x, Array) else x
     return jax.tree_util.tree_map(fn, obj)
-
-

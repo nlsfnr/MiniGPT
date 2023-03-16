@@ -146,6 +146,7 @@ def train_new(
             )
             if run is not None:
                 events = minigpt.log_to_wandb(events=events, run=run)
+            events = minigpt.detect_anomalies(events=events)
             events = minigpt.save_to_directory(events=events)
             for _ in events:
                 pass

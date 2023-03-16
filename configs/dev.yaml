@@ -19,6 +19,7 @@ model:
   embedding_dim: 128
   model_dim: 512
   num_heads: 8
+  pos_emb_portion: 0.5
   hidden_dim: 2_048
   dropout: 0.0
 

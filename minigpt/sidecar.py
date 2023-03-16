@@ -1,14 +1,14 @@
+import os
 import pickle
+import shutil
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Tuple, Dict, Any
-import numpy as np
-import shutil
-import os
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+import numpy as np
 import optax
-from chex import ArrayTree, PRNGKey, Array
+from chex import Array, ArrayTree, PRNGKey
 from wandb.sdk.wandb_run import Run as WandbRun
 
 import wandb
@@ -72,6 +72,45 @@ def log_time_per_step(
             )
             log_fn(" | ".join(items))
         yield event
+
+
+def detect_anomalies(
+    events: Iterable[Event],
+) -> Iterable[Event]:
+    for event in events:
+        if not isinstance(event, TrainStep):
+            yield event
+            continue
+        if np.isnan(event.loss):
+            logger.error(f"Loss is NaN at step {event.step}")
+        if np.isinf(event.loss):
+            logger.error(f"Loss is infinite at step {event.step}")
+        if event.gradients is not None:
+            non_finites = _find_anomalies(event.gradients)
+            for key, reason in non_finites:
+                logger.error(f"Gradient {key} {reason} at step {event.step}")
+        yield event
+
+
+def _find_anomalies(
+    x: ArrayTree,
+    prefix: str = "",
+) -> Iterable[Tuple[str, str]]:
+    if isinstance(x, (np.ndarray, Array)):
+        if np.isnan(x).any():
+            yield prefix, "contains NaNs"
+        if np.isinf(x).any():
+            yield prefix, "contains infinities"
+        if np.std(x) == 0:
+            yield prefix, "has zero std"
+    elif isinstance(x, dict):
+        for key, value in x.items():
+            yield from _find_anomalies(value, prefix + f"{key}.")
+    elif isinstance(x, Iterable):
+        for i, value in enumerate(x):
+            yield from _find_anomalies(value, prefix + f"{i}.")
+    else:
+        raise TypeError(f"Unexpected type {type(x)}")
 
 
 def save_to_directory(

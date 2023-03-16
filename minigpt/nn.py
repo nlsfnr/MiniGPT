@@ -46,11 +46,14 @@ def rotary_pos_emb(
 class MultiHeadAttention(hk.Module):
     def __init__(
         self,
+        *,
         num_heads: int,
+        pos_emb_portion: float,
         name: str,
     ) -> None:
         super().__init__(name=name)
         self.num_heads = num_heads
+        self.pos_emb_portion = pos_emb_portion
 
     def __call__(
         self,
@@ -66,12 +69,13 @@ class MultiHeadAttention(hk.Module):
         v_proj = projection(key_size * self.num_heads, name="v_proj")
         o_proj = projection(model_dim, name="o_proj")
         # Q, K, V
-        q = q_proj(x) / key_size ** 0.5  # B L H K
+        p = int(key_size * self.pos_emb_portion)
+        q = q_proj(x) / key_size**0.5  # B L H K
         q = rearrange(q, "b l (h k) -> b h l k", h=self.num_heads)
-        q = rotary_pos_emb(q)
+        q = jnp.concatenate([rotary_pos_emb(q[..., :p]), q[..., p:]], axis=-1)
         k = k_proj(x)  # B L H K
         k = rearrange(k, "b l (h k) -> b h l k", h=self.num_heads)
-        k = rotary_pos_emb(k)
+        k = jnp.concatenate([rotary_pos_emb(k[..., :p]), k[..., p:]], axis=-1)
         v = v_proj(x)  # B L H V
         v = rearrange(v, "b l (h v) -> b h l v", h=self.num_heads)
         # Attention weights
@@ -79,8 +83,8 @@ class MultiHeadAttention(hk.Module):
 
         def _logits_to_weights(l_: Array) -> Array:
             if mask is not None:
-                l_ = hk.remat(jnp.where)(l_, mask, -1e8)
-            return jax.nn.softmax(l_)  # B H L L
+                l_ = hk.remat(jnp.where)(mask, l_, -1e8)
+            return jax.nn.softmax(l_, axis=-1)  # B H L L
 
         a = full_precision(_logits_to_weights)(l)  # B H L L
         # Attention output
@@ -119,14 +123,17 @@ class FeedForward(hk.Module):
 class Block(hk.Module):
     def __init__(
         self,
+        *,
         num_heads: int,
         hidden_dim: int,
+        pos_emb_portion: float,
         dropout: float,
         name: Optional[str] = None,
     ) -> None:
         super().__init__(name=name)
         self.num_heads = num_heads
         self.hidden_dim = hidden_dim
+        self.pos_emb_portion = pos_emb_portion
         self.dropout = dropout
 
     def __call__(
@@ -135,7 +142,9 @@ class Block(hk.Module):
         is_training: bool,
         mask: Optional[Array] = None,
     ) -> Array:
-        mha = MultiHeadAttention(self.num_heads, name="mha")
+        mha = MultiHeadAttention(
+            num_heads=self.num_heads, pos_emb_portion=self.pos_emb_portion, name="mha"
+        )
         mha_ln = hk.remat(hk.LayerNorm(-1, True, False, name="mha_ln"))
         ff = FeedForward(self.hidden_dim, name="ff")
         ff_ln = hk.remat(hk.LayerNorm(-1, True, False, name="ff_ln"))
@@ -155,11 +164,13 @@ class Block(hk.Module):
 class Model(hk.Module):
     def __init__(
         self,
+        *,
         num_layers: int,
         vocabulary_size: int,
         embedding_dim: int,
         model_dim: int,
         num_heads: int,
+        pos_emb_portion: float,
         hidden_dim: int,
         dropout: float,
         name: Optional[str] = None,
@@ -170,6 +181,7 @@ class Model(hk.Module):
         self.embedding_dim = embedding_dim
         self.model_dim = model_dim
         self.num_heads = num_heads
+        self.pos_emb_portion = pos_emb_portion
         self.hidden_dim = hidden_dim
         self.dropout = dropout
 
@@ -182,6 +194,7 @@ class Model(hk.Module):
             embedding_dim=int(cfg.embedding_dim),
             model_dim=int(cfg.model_dim),
             num_heads=int(cfg.num_heads),
+            pos_emb_portion=float(cfg.pos_emb_portion),
             hidden_dim=int(cfg.hidden_dim),
             dropout=float(cfg.dropout),
         )
@@ -208,7 +221,13 @@ class Model(hk.Module):
             else None
         )
         blocks = [
-            Block(self.num_heads, self.hidden_dim, self.dropout, name=f"block_{i}")
+            Block(
+                num_heads=self.num_heads,
+                hidden_dim=self.hidden_dim,
+                pos_emb_portion=self.pos_emb_portion,
+                dropout=self.dropout,
+                name=f"block_{i}",
+            )
             for i in range(self.num_layers)
         ]
         out_ln = hk.LayerNorm(-1, True, False, name="out_ln")
