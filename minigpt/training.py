@@ -141,7 +141,7 @@ def train(
         gffd = _get_from_first_device
         yield TrainStep(
             step=step,
-            loss=float(loss),
+            loss=float(jax.lax.pmean(loss, "device")),
             gradients=to_cpu(gradients) if gradients is not None else None,
             params=to_cpu(gffd(params)) if log_params else None,
             gradients_finite=bool(gradients_finite),
