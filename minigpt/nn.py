@@ -60,24 +60,25 @@ class MultiHeadAttention(hk.Module):
         x: Array,
         mask: Optional[Array] = None,
     ) -> Array:
-        model_dim = x.shape[-1]
-        key_size = model_dim // self.num_heads
+        # Constants
+        *_, D, H = *x.shape, self.num_heads
+        K = D // H
         # Projections
         projection = partial(hk.Linear, with_bias=False)
-        q_proj = projection(key_size * self.num_heads, name="q_proj")
-        k_proj = projection(key_size * self.num_heads, name="k_proj")
-        v_proj = projection(key_size * self.num_heads, name="v_proj")
-        o_proj = projection(model_dim, name="o_proj")
+        q_proj = projection(K * H, name="q_proj")
+        k_proj = projection(K * H, name="k_proj")
+        v_proj = projection(K * H, name="v_proj")
+        o_proj = projection(D, name="o_proj")
         # Q, K, V
-        p = int(key_size * self.pos_emb_portion)
-        q = q_proj(x) / key_size**0.5  # B L H K
-        q = rearrange(q, "b l (h k) -> b h l k", h=self.num_heads)
+        p = int(K * self.pos_emb_portion)
+        q = q_proj(x) / K**0.5  # B L H K
+        q = rearrange(q, "b l (h k) -> b h l k", h=H)
         q = jnp.concatenate([rotary_pos_emb(q[..., :p]), q[..., p:]], axis=-1)
         k = k_proj(x)  # B L H K
-        k = rearrange(k, "b l (h k) -> b h l k", h=self.num_heads)
+        k = rearrange(k, "b l (h k) -> b h l k", h=H)
         k = jnp.concatenate([rotary_pos_emb(k[..., :p]), k[..., p:]], axis=-1)
         v = v_proj(x)  # B L H V
-        v = rearrange(v, "b l (h v) -> b h l v", h=self.num_heads)
+        v = rearrange(v, "b l (h v) -> b h l v", h=H)
         # Attention weights
         l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
 

@@ -77,6 +77,23 @@ def load_huggingface_dataset(
             break
 
 
+def tokenizer_from_config(
+    config: Config,
+) -> Tokenizer:
+    """Load a tokenizer from a config.
+
+    Args:
+        config: Config to use.
+
+    Returns:
+        A tokenizer.
+    """
+    return load_huggingface_tokenizer(
+        config.tokenizer.args,
+        config.tokenizer.kwargs,
+    )
+
+
 def load_huggingface_tokenizer(
     args: Iterable[str],
     kwargs: Mapping[str, str],
@@ -177,7 +194,7 @@ def collate(
         Collated samples as numpy arrays.
     """
     values = (sample[input_key] for sample in samples)
-    batched_values = chunks(values, batch_size)
+    batched_values = chunks(values, batch_size, drop_last=True)
     for batch in batched_values:
         if not all(len(value) == len(batch[0]) for value in batch[1:]):
             raise ValueError(f"Expected equal sample lengths, got {batch}")
@@ -187,6 +204,7 @@ def collate(
 def chunks(
     iterable: Iterable[T],
     size: int,
+    drop_last: bool = False,
 ) -> Iterable[Sequence[T]]:
     """Split an iterable into chunks of a given size.
 
@@ -198,6 +216,8 @@ def chunks(
     while True:
         chunk = list(itertools.islice(iterator, size))
         if not chunk:
+            break
+        if drop_last and len(chunk) < size:
             break
         yield chunk
 

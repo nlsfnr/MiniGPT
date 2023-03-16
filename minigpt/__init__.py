@@ -13,6 +13,7 @@ from .sidecar import (
 )
 from .threading_utils import BufferedIterator
 from .training import Event, TrainStep, train
+from .inference import generate
 
 __all__ = (
     "BufferedIterator",
@@ -22,6 +23,7 @@ __all__ = (
     "TrainStep",
     "batches_from_config",
     "detect_anomalies",
+    "generate",
     "get_logger",
     "load_from_directory",
     "load_wandb_run",

@@ -33,7 +33,7 @@ def cli(
 @click.option("--seed", "-s", type=int, default=None,
               help="Random seed.")
 @click.option("--load-from", "-l", type=Path, default=None,
-              help="Path to the checkpoint to load from. Default None")
+              help="Path to the checkpoint to load from. Default None.")
 @click.option("--save-frequency", "-sf", type=int, default=250,
               help="Save frequency. Default 250.")
 @click.option("--save-directory", "-sd", type=Path, default=None,
