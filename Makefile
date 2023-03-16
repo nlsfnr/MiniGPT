@@ -2,11 +2,11 @@ VENV=.venv
 PYTHON=$(VENV)/bin/python3
 DOCKER=minigpt
 PIP_FREEZE=.requirements.freeze.txt
-TEST_DIR=minigpt/
-PY_FILES=minigpt/
+TEST_DIR=tests/
+PY_FILES=minigpt/ scripts/ tests/*.py
 
 .PHONY: ci
-ci: $(PY_FILES) py-deps type-check lint test
+ci: $(PY_FILES) py-deps type-check format test
 
 .PHONY: type-check
 type-check: $(VENV) $(PY_FILES)
@@ -17,11 +17,11 @@ type-check: $(VENV) $(PY_FILES)
 		--pretty \
 		$(PY_FILES)
 
-.PHONY: lint
-lint: $(VENV) $(PY_FILES)
+.PHONY: format
+format: $(VENV) $(PY_FILES)
 	$(PYTHON) -m isort $(PY_FILES)
-	$(PYTHON) -m flake8 $(PY_FILES) \
-		--ignore E402,W503,E731
+	$(PYTHON) -m black $(PY_FILES)
+	$(PYTHON) -m flake8 $(PY_FILES)
 
 
 .PHONY: test

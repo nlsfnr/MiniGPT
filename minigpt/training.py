@@ -1,455 +1,305 @@
-#!/usr/bin/env python3
-'''The training loop and loss function. Also implements some auxiliary
-functions such as automatic logging, etc.'''
 from __future__ import annotations
 
-import csv
-import logging
-import sys
-import time
-from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
-from itertools import count
+from itertools import islice
 from pathlib import Path
-from typing import (Any, Dict, Iterable, Iterator, List, Optional, Protocol,
-                    Tuple, Type, TypeVar)
+from typing import Iterable, NamedTuple, Optional, Tuple, TypeVar, Union
 
-import click
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import jmp
+import numpy as np
 import optax
 from chex import Array, ArrayTree, PRNGKey
 from einops import rearrange
 
-if __name__ == '__main__':
-    # If the module is executed we need to add the parent module to the discoverable imports
-    sys.path.append('.')
+from . import data, nn
+from .common import Config, get_logger
 
-from minigpt import common, data, nn
+logger = get_logger()
 
-logger = logging.getLogger(common.NAME)
-
-
-T = TypeVar('T')
+ArrayTreeT = TypeVar("ArrayTreeT", bound=ArrayTree)
+T = TypeVar("T")
 
 
-class TrainingConfig(nn.ModelConfig, Protocol):
-    '''Configuration for training.'''
-    batch_size: int
-    use_half_precision: bool
-    loss_scale_period: Optional[int]
-    initial_loss_scale_log2: Optional[int]
-    peak_learning_rate: float
-    end_learning_rate: float
-    max_gradient_norm: float
-    warmup_steps: int
-    total_steps: Optional[int]
-    weight_decay: float
-    yield_freq: int
-
-    @classmethod
-    @abstractmethod
-    def from_yaml(cls: Type[T], path: Path) -> T:
-        raise NotImplementedError
-
-    @abstractmethod
-    def to_yaml(self: T, path: Path) -> T:
-        raise NotImplementedError
+class Event:
+    pass
 
 
 @dataclass
-class TelemetryData:
-    '''Data to be logged during training.'''
+class TrainStep(Event):
     step: int
-    epoch: int
-    params: ArrayTree
-    opt_state: optax.OptState
-    loss_scale: jmp.LossScale
-    config: TrainingConfig
-    rngs: hk.PRNGSequence
+    loss: float
     gradients_finite: bool
-    loss: Array
-    time_passed: float
+    gradients: Optional[ArrayTree] = None
+    params: Optional[ArrayTree] = None
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
-def train(config: TrainingConfig,
-          params: ArrayTree,
-          opt_state: optax.OptState,
-          batches: Iterable[Array],
-          rngs: hk.PRNGSequence,
-          loss_scale: Optional[jmp.LossScale] = None,
-          step: int = 0,
-          ) -> Iterator[TelemetryData]:
-    '''Train the model, yielding telemetry data at each step.'''
-    # Preparations
-    policy = get_policy(config)
-    loss_scale = get_loss_scale(config, step) if loss_scale is None else loss_scale
-    train_step_jit = jax.pmap(partial(train_step, config=config, axis_name='device'),
-                              axis_name='device',
-                              donate_argnums=5)
+@dataclass
+class Save(Event):
+    path: Path
+    step: int
+    config: Config
+    params: ArrayTree
+    loss_scale: jmp.LossScale
+    opt_state: optax.MultiStepsState
+    rng_key: PRNGKey
+    seed: int
+
+
+def to_cpu(t: ArrayTreeT) -> ArrayTreeT:
+    if t is None:
+        return t
+    cpu = jax.devices("cpu")[0]
+    return jax.tree_util.tree_map(lambda x: jax.device_put(x, device=cpu), t)
+
+
+def train(
+    *,
+    config: Config,
+    seed: int,
+    rng_key: Optional[PRNGKey] = None,
+    params: Optional[ArrayTree] = None,
+    opt_state: Optional[optax.MultiStepsState] = None,
+    loss_scale: Optional[jmp.LossScale] = None,
+    step: Optional[int] = None,
+    batches: Optional[Union[Iterable[Array], Iterable[np.ndarray]]] = None,
+    save_frequency: Optional[int] = None,
+    save_directory: Optional[Path] = None,
+    log_gradients_frequency: Optional[int] = None,
+    log_params_frequency: Optional[int] = None,
+    log_param_size_on_init: bool = True,
+) -> Iterable[Event]:
+    if rng_key is None:
+        rng_key = jax.random.PRNGKey(seed)
+    if params is None:
+        params = nn.Model.get_params(config, seed + 1, log_size=log_param_size_on_init)
+    if opt_state is None:
+        opt_state = _get_optimizer(config).init(params)
+    if step is None:
+        step = 0
+    if loss_scale is None:
+        loss_scale = _get_loss_scale(config, step)
+    if batches is None:
+        batches = islice(data.batches_from_config(config, seed + 2), step, None)
+    batches = map(partial(jnp.asarray, dtype=jnp.int32), batches)
+    policy = _set_amp_policy(config)
+    assert params is not None
+    assert opt_state is not None
+    assert rng_key is not None
+    assert step is not None
+    assert batches is not None
     device_count = jax.device_count()
-    logger.info(f'Devices found: {device_count}.')
-    # Broadcast components across devices
-    params = broadcast_to_devices(params)
-    opt_state = broadcast_to_devices(opt_state)
-    loss_scale = broadcast_to_devices(loss_scale)
-    # Training loop
-    t = time.perf_counter()
-    for epoch in count():
-        for indices in batches:
-            indices = policy.cast_to_compute(indices)
-            # Split indices and RNG betweenn devices
-            indices = rearrange(indices, '(d b) ... -> d b ...', d=device_count)
-            rng = jax.random.split(next(rngs), num=device_count)
-            params, opt_state, loss_scale, telemetry_dict = train_step_jit(
-                indices, params, opt_state, loss_scale, rng)
-            if step % config.yield_freq == 0:
-                yield TelemetryData(
+    params = _broadcast_to_devices(params)
+    opt_state = _broadcast_to_devices(opt_state)
+    loss_scale = _broadcast_to_devices(loss_scale)
+
+    train_step_with_gradients = jax.pmap(
+        partial(_train_step, config=config, axis_name="device", with_gradients=True),
+        axis_name="device",
+    )
+    train_step_without_gradients = jax.pmap(
+        partial(_train_step, config=config, axis_name="device", with_gradients=False),
+        axis_name="device",
+    )
+
+    for batch in batches:
+        rng_key, subkey = jax.random.split(rng_key)
+        subkeys = jax.random.split(subkey, num=device_count)
+        batch = policy.cast_to_compute(batch)
+        batch = rearrange(batch, "(d b) ... -> d b ...", d=device_count)
+        with_gradients = (
+            log_gradients_frequency is not None and step % log_gradients_frequency == 0
+        )
+        train_step = (
+            train_step_with_gradients
+            if with_gradients
+            else train_step_without_gradients
+        )
+        rv: _TrainStepRV = train_step(
+            indices=batch,
+            params=params,
+            opt_state=opt_state,
+            loss_scale=loss_scale,
+            rng_key=subkeys,
+        )
+        (
+            params,
+            opt_state,
+            loss_scale,
+            loss,
+            gradients,
+            gradients_finite,
+        ) = rv
+        log_params = (
+            log_params_frequency is not None and step % log_params_frequency == 0
+        )
+        gffd = _get_from_first_device
+        yield TrainStep(
+            step=step,
+            loss=float(loss),
+            gradients=to_cpu(gradients) if gradients is not None else None,
+            params=to_cpu(gffd(params)) if log_params else None,
+            gradients_finite=bool(gradients_finite),
+        )
+        if save_directory is not None:
+            assert save_frequency is not None
+            if step % save_frequency == 0:
+                yield Save(
+                    path=save_directory,
                     step=step,
-                    epoch=epoch,
-                    params=get_from_first_device(params),
-                    opt_state=get_from_first_device(opt_state),
-                    loss_scale=get_from_first_device(loss_scale),
                     config=config,
-                    rngs=rngs,
-                    loss=jnp.mean(telemetry_dict['loss']),
-                    gradients_finite=telemetry_dict['gradients_finite'].all(),
-                    time_passed=time.perf_counter() - t)
-            step += 1
-            t = time.perf_counter()
-        logger.info(f'Epoch {epoch + 1:,} finished')
+                    params=to_cpu(gffd(params)),
+                    opt_state=to_cpu(gffd(opt_state)),
+                    loss_scale=to_cpu(gffd(loss_scale)),
+                    rng_key=to_cpu(rng_key),
+                    seed=seed,
+                )
+        step += 1
 
 
-def train_step(indices: Array,
-               params: ArrayTree,
-               opt_state: optax.OptState,
-               loss_scale: jmp.LossScale,
-               rng: PRNGKey,
-               *,
-               config: TrainingConfig,
-               axis_name: str,
-               ) -> Tuple[ArrayTree,
-                          optax.OptState,
-                          jmp.LossScale,
-                          Dict[str, Any]]:
-    # Preparations
-    loss_hk = hk.transform(partial(loss_fn, config=config))
-    grad_fn = jax.grad(loss_hk.apply, has_aux=True)
-    optimizer = get_optimizer(config)
-    # Execution
-    gradients, telemetry_dict = grad_fn(params, rng, indices, loss_scale)
+class _TrainStepRV(NamedTuple):
+    params: ArrayTree
+    opt_state: optax.MultiStepsState
+    loss_scale: jmp.LossScale
+    loss: Array
+    gradients: Optional[ArrayTree]
+    gradients_finite: Array
+
+
+def _train_step(
+    *,
+    indices: Array,
+    params: ArrayTree,
+    opt_state: optax.MultiStepsState,
+    loss_scale: jmp.LossScale,
+    rng_key: PRNGKey,
+    config: Config,
+    axis_name: str,
+    with_gradients: bool,
+) -> _TrainStepRV:
+    loss_fn = hk.transform(partial(_loss_fn, config=config)).apply
+    grad_fn = jax.grad(loss_fn, has_aux=True)
+    optimizer = _get_optimizer(config)
+    gradients, loss_aux = grad_fn(
+        params, rng_key, indices=indices, loss_scale=loss_scale
+    )
     gradients = jax.lax.pmean(gradients, axis_name=axis_name)
     gradients = loss_scale.unscale(gradients)
     gradients_finite = jmp.all_finite(gradients)
-    loss_scale = loss_scale.adjust(gradients_finite)
     updates, new_opt_state = optimizer.update(gradients, opt_state, params)
     new_params = optax.apply_updates(params, updates)
-    # Only actually update the params and opt_state if all gradients were finite
     opt_state, params = jmp.select_tree(
-        gradients_finite,
-        (new_opt_state, new_params),
-        (opt_state, params))
-    return (params,
-            opt_state,
-            loss_scale,
-            dict(telemetry_dict,
-                 gradients_finite=gradients_finite))
-
-
-def loss_fn(indices: Array,
-            loss_scale: jmp.LossScale,
-            *,
-            config: TrainingConfig,
-            ) -> Tuple[Array, Dict[str, Any]]:
-    model = nn.Model.from_config(config)
-    logits = model(indices[:, :-1], is_training=True)
-    one_hot_targets = hk.one_hot(indices[:, 1:], logits.shape[-1])
-    losses = optax.softmax_cross_entropy(logits, one_hot_targets)
-    loss = jnp.mean(losses)
-    scaled_loss = loss_scale.scale(loss)
-    return scaled_loss, dict(logits=logits,
-                             losses=losses,
-                             loss=loss)
-
-
-def get_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
-    '''Get the optimizer with linear warmup and cosine decay.'''
-    return optax.chain(
-        # Gradient clipping
-        optax.clip_by_global_norm(config.max_gradient_norm),
-        optax.adamw(get_learning_rate_schedule(config), weight_decay=config.weight_decay)
+        gradients_finite, (new_opt_state, new_params), (opt_state, params)
+    )
+    return _TrainStepRV(
+        params=params,
+        opt_state=opt_state,
+        loss_scale=loss_scale,
+        loss=loss_aux.loss,
+        gradients=gradients if with_gradients else None,
+        gradients_finite=gradients_finite,
     )
 
 
-def get_policy(config: TrainingConfig) -> jmp.Policy:
-    '''Get and set the policy for mixed precision training.'''
-    full = jnp.float32
-    half = jnp.float16 if config.use_half_precision else jnp.float32
-    half_policy = jmp.Policy(param_dtype=full,
-                             compute_dtype=half,
-                             output_dtype=full)
-    full_policy = jmp.Policy(param_dtype=full,
-                             compute_dtype=full,
-                             output_dtype=full)
-    hk.mixed_precision.set_policy(nn.Model, half_policy)
+class _LossFnAux(NamedTuple):
+    loss: Array
+
+
+def _loss_fn(
+    *,
+    indices: Array,
+    loss_scale: jmp.LossScale,
+    config: Config,
+) -> Tuple[Array, _LossFnAux]:
+    model = nn.Model.from_config(config)
+    inputs = indices[:, :-1]
+    seq_len = inputs.shape[1]
+    mask = jnp.tril(jnp.full((1, 1, seq_len, seq_len), True, dtype=bool))
+    logits = model(inputs, is_training=True, mask=mask)
+    loss = jnp.mean(
+        optax.softmax_cross_entropy_with_integer_labels(logits, indices[:, 1:])
+    )
+    return loss_scale.scale(loss), _LossFnAux(loss=loss)
+
+
+def _get_optimizer(
+    config: Config,
+) -> optax.MultiSteps:
+    cfg = config.optimizer
+    lr_schedule = optax.join_schedules(
+        [
+            optax.linear_schedule(cfg.lr_min, cfg.lr_max, cfg.lr_warmup_steps),
+            (
+                optax.cosine_decay_schedule(
+                    cfg.lr_max,
+                    cfg.lr_decay_steps,
+                    alpha=cfg.lr_min / cfg.lr_max,
+                )
+                if cfg.lr_decay_steps is not None
+                else optax.constant_schedule(cfg.lr_max)
+            ),
+        ],
+        [cfg.lr_warmup_steps],
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(cfg.gradient_clip_norm),
+        optax.adamw(
+            learning_rate=1.0,
+            b1=cfg.adam_b1,
+            b2=cfg.adam_b2,
+            weight_decay=cfg.weight_decay,
+        ),
+        optax.scale_by_schedule(lr_schedule),
+    )
+    return optax.MultiSteps(optimizer, cfg.gradient_accumulation_steps)
+
+
+def _get_loss_scale(
+    config: Config,
+    step: int,
+) -> jmp.LossScale:
+    if not config.mixed_precision.enable:
+        return jmp.NoOpLossScale()
+    return jmp.DynamicLossScale(
+        loss_scale=jnp.asarray(
+            2**config.mixed_precision.initial_scale_log2, dtype=jnp.float32
+        ),
+        counter=jnp.asarray(step, dtype=jnp.int32),
+        period=config.mixed_precision.scale_period,
+    )
+
+
+def _set_amp_policy(config: Config) -> jmp.Policy:
+    """Get and set the policy for mixed precision training."""
+    full = jnp.dtype(jnp.float32)
+    half = jnp.dtype(jnp.float16 if config.mixed_precision.enable else jnp.float32)
+    half_policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=half)
+    full_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=full)
+    hk.mixed_precision.set_policy(nn.Model, full_policy)
+    hk.mixed_precision.set_policy(nn.Block, half_policy)
+    hk.mixed_precision.set_policy(hk.Linear, half_policy)
     hk.mixed_precision.set_policy(hk.LayerNorm, full_policy)
     return half_policy
 
 
-def get_loss_scale(config: TrainingConfig,
-                   step: int,
-                   ) -> jmp.LossScale:
-    '''Get the loss scale for mixed precision training.'''
-    if not config.use_half_precision:
-        return jmp.NoOpLossScale()
-    msg = 'initial_loss_scale_log2 must be set for mixed precision training.'
-    assert config.initial_loss_scale_log2 is not None, msg
-    if config.loss_scale_period is None:
-        return jmp.StaticLossScale(
-            2. ** jnp.asarray(config.initial_loss_scale_log2))
-    return jmp.DynamicLossScale(
-        2. ** jnp.asarray(config.initial_loss_scale_log2),
-        counter=jnp.asarray(step % config.loss_scale_period),
-        period=config.loss_scale_period)
-
-
-def get_learning_rate_schedule(config: TrainingConfig) -> optax.Schedule:
-    '''Get the learning rate schedule with linear warmup and optional cosine decay.'''
-    if config.total_steps is not None:
-        lr_schedule = optax.warmup_cosine_decay_schedule(
-            init_value=0.,
-            peak_value=config.peak_learning_rate,
-            warmup_steps=config.warmup_steps,
-            decay_steps=config.total_steps - config.warmup_steps,
-            end_value=config.end_learning_rate,
-        )
-    else:
-        schedules = [
-            optax.linear_schedule(
-                init_value=0.,
-                end_value=config.peak_learning_rate,
-                transition_steps=config.warmup_steps),
-            optax.constant_schedule(config.peak_learning_rate),
-        ]
-        lr_schedule = optax.join_schedules(schedules, [config.warmup_steps])
-    return lr_schedule
-
-
-def get_optimizer_state(config: TrainingConfig,
-                        params: ArrayTree,
-                        ) -> optax.OptState:
-    '''Get the optimizer state.'''
-    optimizer = get_optimizer(config)
-    opt_state = optimizer.init(params)
-    opt_state_n = hk.data_structures.tree_size(opt_state)
-    opt_state_mb = round(hk.data_structures.tree_bytes(opt_state) / 1e6, 2)
-    logger.info(f'Optimizer state: {opt_state_n:,} ({opt_state_mb:.2f} MB)')
-    return opt_state
-
-
-def broadcast_to_devices(obj: T) -> T:
+def _broadcast_to_devices(obj: T) -> T:
     device_count = jax.device_count()
-    fn = lambda x: (jnp.broadcast_to(x, (device_count, *x.shape))
-                    if isinstance(x, Array) else
-                    x)
+    fn = lambda x: (
+        jnp.broadcast_to(x, (device_count, *x.shape)) if isinstance(x, Array) else x
+    )
     return jax.tree_util.tree_map(fn, obj)
 
 
-def get_from_first_device(obj: T) -> T:
+def _get_from_first_device(obj: T) -> T:
     fn = lambda x: x[0] if isinstance(x, Array) else x
     return jax.tree_util.tree_map(fn, obj)
 
 
-def concat_from_devices(obj: T) -> T:
-    fn = lambda x: rearrange(x, 'd b ... -> (d b) ...') if isinstance(x, Array) else x
+def _concat_from_devices(obj: T) -> T:
+    fn = lambda x: rearrange(x, "d b ... -> (d b) ...") if isinstance(x, Array) else x
     return jax.tree_util.tree_map(fn, obj)
-
-
-def autosave(telemetry_iter: Iterator[TelemetryData],
-             frequency: int,
-             path: Path,
-             ) -> Iterator[TelemetryData]:
-    '''Save the model parameters and optimizer state etc. at regular intervals.'''
-    for telemetry in telemetry_iter:
-        if not isinstance(telemetry.config, common.YamlConfig):
-            raise ValueError('The config must be a YamlConfig to be saved.')
-        if telemetry.step % frequency == 0:
-            common.save_checkpoint(path,
-                                   config=telemetry.config,
-                                   params=telemetry.params,
-                                   opt_state=telemetry.opt_state,
-                                   rngs=telemetry.rngs,
-                                   loss_scale=telemetry.loss_scale,
-                                   step=telemetry.step)
-        yield telemetry
-
-
-def autolog(telemetry_iter: Iterator[TelemetryData],
-            frequency: int,
-            ) -> Iterator[TelemetryData]:
-    '''Log the telemetry data at the specified frequency.'''
-    loss_history = []
-    time_history = []
-    for telemetry in telemetry_iter:
-        loss_history.append(telemetry.loss)
-        time_history.append(telemetry.time_passed)
-        if not telemetry.gradients_finite:
-            logger.warning('Non-finite gradients')
-        if telemetry.step % frequency == 0 and loss_history:
-            mean_loss = jnp.mean(jnp.asarray(loss_history))
-            mean_time = jnp.mean(jnp.asarray(time_history))
-            logger.info(f'Step: {telemetry.step:,}'
-                        f' | loss: {mean_loss:.4f}'
-                        f' | S/step: {mean_time:.4f}')
-            loss_history.clear()
-            time_history.clear()
-        yield telemetry
-
-
-def log_to_csv(telemetry_iter: Iterator[TelemetryData],
-               path: Path,
-               ) -> Iterator[TelemetryData]:
-    '''Log the telemetry data to a CSV file.'''
-    lr_sched = None
-    path.parent.mkdir(parents=True, exist_ok=True)
-    did_exist = path.exists()
-    if not did_exist:
-        path.touch()
-    with path.open('a') as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            'time', 'step', 'epoch', 'loss', 'learning_rate', 'time_passed'])
-        if not did_exist:
-            writer.writeheader()
-        for telemetry in telemetry_iter:
-            if lr_sched is None:
-                lr_sched = get_learning_rate_schedule(telemetry.config)
-            writer.writerow(dict(time=datetime.now().isoformat(),
-                                 step=telemetry.step,
-                                 epoch=telemetry.epoch,
-                                 loss=telemetry.loss,
-                                 learning_rate=lr_sched(telemetry.step),
-                                 time_passed=telemetry.time_passed))
-            yield telemetry
-
-
-class Config(common.YamlConfig):
-
-    # Training config
-    batch_size: int
-    use_half_precision: bool
-    loss_scale_period: Optional[int]
-    initial_loss_scale_log2: Optional[int]
-    peak_learning_rate: float
-    end_learning_rate: float
-    max_gradient_norm: float
-    warmup_steps: int
-    total_steps: Optional[int]
-    weight_decay: float
-    yield_freq: int
-
-    # Model config
-    vocab_size: int
-    embedding_size: int
-    max_sequence_length: int
-    num_layers: int
-    num_heads: int
-    value_size: int
-    key_size: int
-    w_init_var: float
-    embed_init_var: float
-    use_rotary_embedding: bool
-    mlp_size: Optional[int] = None
-    model_size: Optional[int] = None
-    dropout: float = 0.1
-
-    # Data config
-    datasets: List[str]
-    dataset_weights: List[float]
-    tokenizer_path: Path
-    tokenizer_kind: str
-    min_frequency: int
-    min_length: int
-    shuffle_buffer_size: int
-
-    # DataLoader config
-    num_workers: int
-
-
-def get_cli() -> click.Group:
-    '''Get the command line interface for this module.'''
-
-    cli = common.get_cli_group('training')
-
-    @cli.command('train')
-    @click.option('--config-path', '-c', type=Path, default=None,
-                  help='Path to the configuration file')
-    @click.option('--load-from', '-l', type=Path, default=None,
-                  help='Path to a checkpoint to resume training')
-    @click.option('--save-path', '-o', type=Path, default=None,
-                  help='Path to save checkpoints automatically')
-    @click.option('--save-frequency', '-f', type=int, default=1000,
-                  help='Frequency at which to save checkpoints automatically')
-    @click.option('--log-frequency', type=int, default=10,
-                  help='Frequency at which to log metrics automatically')
-    @click.option('--csv-path', type=Path, default=None,
-                  help='Path to save metrics in a CSV file')
-    @click.option('--stop-at', type=int, default=None,
-                  help='Stop training after this many steps')
-    @click.option('--seed', type=int, default=None, help='Random seed')
-    def cli_train(config_path: Optional[Path],
-                  load_from: Optional[Path],
-                  save_path: Optional[Path],
-                  save_frequency: int,
-                  log_frequency: int,
-                  csv_path: Optional[Path],
-                  stop_at: Optional[int],
-                  seed: Optional[int],
-                  ) -> None:
-        '''Train a model.'''
-        if config_path is None and load_from is None:
-            raise ValueError('Either a configuration file or a checkpoint must be provided')
-        if config_path is not None and load_from is not None:
-            raise ValueError('Only one of configuration file or checkpoint must be provided')
-        if config_path is not None:
-            config = Config.from_yaml(config_path)
-            rngs = common.get_rngs(seed)
-            params = nn.Model.get_params(config, next(rngs))
-            opt_state = get_optimizer_state(config, params)
-            step = 0
-            loss_scale = None
-        else:
-            assert load_from is not None
-            checkpoint = common.load_checkpoint(load_from, config_class=Config)
-            config = checkpoint['config']
-            rngs = checkpoint['rngs']
-            params = checkpoint['params']
-            opt_state = checkpoint['opt_state']
-            step = checkpoint['step']
-            loss_scale = checkpoint['loss_scale']
-        batches = data.get_batches(config)
-        telemetry_iter = train(config=config,
-                               params=params,
-                               opt_state=opt_state,
-                               batches=(jnp.asarray(batch) for batch in batches),
-                               rngs=rngs,
-                               loss_scale=loss_scale,
-                               step=step)
-        if save_path is not None:
-            telemetry_iter = autosave(telemetry_iter, save_frequency, save_path)
-        if csv_path is not None:
-            telemetry_iter = log_to_csv(telemetry_iter, csv_path)
-        telemetry_iter = autolog(telemetry_iter, log_frequency)
-        i = stop_at if stop_at is not None else -1
-        while i != 0:
-            next(telemetry_iter)
-            i -= 1
-
-    return cli
-
-
-if __name__ == '__main__':
-    get_cli()()

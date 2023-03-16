@@ -1,160 +1,98 @@
-'''Common functionality shared across modules.'''
-import json
-import logging
-import pickle
-import random
-import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Type, TypeVar, Union
+from __future__ import annotations
 
-import chex
-import click
-import haiku as hk
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional, TypeVar
+
 import jax
-import jmp
-import optax
-import pydantic
 import yaml
 
-NAME = 'MiniGPT'
+_logger = logging.getLogger("MiniGPT")
+_DEFAULT_LOGFILE = Path.cwd() / "minigpt.log"
+T = TypeVar("T")
 
-logger = logging.getLogger(NAME)
+
+def get_logger() -> logging.Logger:
+    global _logger
+    return _logger
+
+
+logger = get_logger()
+
+
+def setup_logging(
+    level: str = "INFO",
+    logfile: Optional[Path] = _DEFAULT_LOGFILE,
+) -> None:
+    logger = get_logger()
+    logger.setLevel(level)
+    formatter = logging.Formatter("[%(asctime)s|%(name)s|%(levelname)s] %(message)s")
+    # Clear any existing handlers
+    logger.handlers = []
+    # Add a handler for stdout
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    # Add a handler for the logfile
+    if logfile:
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
 
 def set_debug(debug: bool) -> None:
-    jax.config.update('jax_debug_nans', debug)
-    jax.config.update('jax_debug_infs', debug)
-    jax.config.update('jax_disable_jit', debug)
+    jax.config.update("jax_debug_nans", debug)
+    jax.config.update("jax_debug_infs", debug)
+    jax.config.update("jax_disable_jit", debug)
     if debug:
-        logger.warn('Running in debug mode')
+        logger.warn("Running in debug mode")
 
 
-def get_rngs(seed: Optional[Union[hk.PRNGSequence, int]] = None,
-             ) -> hk.PRNGSequence:
-    '''Get a PRNG sequence from an int or an existing PRNG sequence.'''
-    if isinstance(seed, hk.PRNGSequence):
-        return seed
-    seed = (random.randint(0, 2**32 - 1)
-            if seed is None else
-            seed)
-    logger.info(f'Using seed {seed}')
-    return hk.PRNGSequence(seed)
+class Config(Dict[str, Any]):
+    """A dictionary with syntax similar to that of JavaScript objects. I.e.
+    instead of d['my_key'], we can simply say d.my_key."""
 
+    def __getattr__(self, key: str) -> Any:
+        try:
+            return super().__getattribute__(key)
+        except AttributeError:
+            if key not in self:
+                raise KeyError(f"Key '{key}' not found in config {self}")
+            return self[key]
 
-T = TypeVar('T', bound='YamlConfig')
-
-
-class YamlConfig(pydantic.BaseModel):
+    def __setattr__(self, key: str, val: Any) -> None:
+        self[key] = val
 
     @classmethod
-    def from_yaml(cls, path: Path):
-        with open(path) as f:
-            data = yaml.safe_load(f)
-        return cls(**data)
+    def from_dict(cls, d: Dict[str, Any]) -> Config:
+        return Config(**{k: cls._from_obj(v) for k, v in d.items()})
 
-    def to_yaml(self: T, path: Path) -> T:
-        with open(path, "w") as f:
-            # Use self.json() instead of self.dict() to avoid having to catet
-            # to edge cases such as serializing Paths.
-            yaml.dump(json.loads(self.json()), f)
-        return self
+    @classmethod
+    def _from_obj(cls, o: Any) -> Any:
+        if isinstance(o, dict):
+            return cls.from_dict(o)
+        if isinstance(o, list):
+            return [cls._from_obj(x) for x in o]
+        return o
 
+    def to_dict(self) -> Dict[str, Any]:
+        def _to_obj(x: Any) -> Any:
+            if isinstance(x, Config):
+                return {k: _to_obj(v) for k, v in x.items()}
+            if isinstance(x, list):
+                return [_to_obj(i) for i in x]
+            return x
 
-def save_checkpoint(path: Path,
-                    config: YamlConfig,
-                    params: chex.ArrayTree,
-                    opt_state: optax.OptState,
-                    rngs: hk.PRNGSequence,
-                    loss_scale: jmp.LossScale,
-                    step: int,
-                    ) -> None:
-    '''Save the checkpoint to a directory.'''
-    path.mkdir(parents=True, exist_ok=True)
-    # Save the configuration
-    config.to_yaml(path / 'config.yaml')
-    # Save the parameters
-    with open(path / 'params.pkl', 'wb') as f:
-        pickle.dump(params, f)
-    # Save the optimizer state
-    with open(path / 'opt_state.pkl', 'wb') as f:
-        pickle.dump(opt_state, f)
-    # Save the step as a yaml file
-    with open(path / 'other.yaml', 'w') as f:
-        yaml.dump(dict(step=step), f)
-    # Save the RNGs
-    with open(path / 'rngs.pkl', 'wb') as f:
-        pickle.dump(rngs, f)
-    # Save the loss scale
-    with open(path / 'loss_scale.pkl', 'wb') as f:
-        pickle.dump(loss_scale, f)
-    logger.info(f'Saved checkpoint to {path} at step {step:,}.')
+        obj = _to_obj(self)
+        assert isinstance(obj, dict)
+        return obj
 
+    @classmethod
+    def from_yaml(cls, path: Path) -> Config:
+        with open(path) as fh:
+            d = dict(yaml.safe_load(fh))
+        return cls.from_dict(d)
 
-def load_checkpoint(path: Path,
-                    config_class: Type[YamlConfig],
-                    for_inference: bool = False,
-                    ) -> Dict[str, Any]:
-    '''Load the checkpoint from a directory.'''
-    config = config_class.from_yaml(path / 'config.yaml')
-    # Load the parameters
-    with open(path / 'params.pkl', 'rb') as f:
-        params = pickle.load(f)
-    if for_inference:
-        return dict(config=config,
-                    params=params)
-    # Load the optimizer state
-    with open(path / 'opt_state.pkl', 'rb') as f:
-        opt_state = pickle.load(f)
-    # Load the step from the yaml file
-    with open(path / 'other.yaml', 'r') as f:
-        other = yaml.load(f, Loader=yaml.FullLoader)
-    step = other['step']
-    # Load the RNGs
-    with open(path / 'rngs.pkl', 'rb') as f:
-        rngs_internal_state = pickle.load(f).internal_state
-    rngs = hk.PRNGSequence(0)
-    rngs.replace_internal_state(rngs_internal_state)
-    # Load the loss scale
-    with open(path / 'loss_scale.pkl', 'rb') as f:
-        loss_scale = pickle.load(f)
-    return dict(config=config,
-                params=params,
-                opt_state=opt_state,
-                rngs=rngs,
-                step=step,
-                loss_scale=loss_scale)
-
-
-def setup_logging(log_level: str,
-                  log_to_stdout: bool,
-                  logfile: Optional[Path],
-                  ) -> None:
-    handlers: List[logging.Handler] = []
-    handlers.append(logging.StreamHandler(sys.stdout if log_to_stdout else sys.stderr))
-    if logfile is not None:
-        handlers.append(logging.FileHandler(logfile))
-    logging.basicConfig(level=log_level,
-                        format='[%(asctime)s|%(name)s|%(levelname)s] %(message)s',
-                        handlers=handlers)
-
-
-def get_cli_group(name: str) -> click.Group:
-    '''Get a click group with a common set of options.'''
-    full_name = f'{NAME} - {name}'
-
-    @click.group(full_name)
-    @click.option('--log-level', default='INFO', help='Log level')
-    @click.option('--log-to-stdout', is_flag=True, help='Log to stdout instead of stderr')
-    @click.option('--logfile', type=Path, default=Path('./logs.log'), help='Log file')
-    @click.option('--debug', '-d', is_flag=True, help='Debug mode')
-    def cli(log_level: str,
-            log_to_stdout: bool,
-            logfile: Optional[Path],
-            debug: bool,
-            ) -> None:
-        '''MiniGPT, a GPT-like language model'''
-        setup_logging(log_level, log_to_stdout, logfile)
-        logger.info(f'Starting {full_name}')
-        set_debug(debug)
-
-    return cli
+    def to_yaml(self, path: Path) -> None:
+        with open(path, "w") as fh:
+            yaml.dump(self.to_dict(), fh)

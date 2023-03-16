@@ -1,26 +1,24 @@
-# ML
+# DL
 dm-haiku
-jmp
 chex==0.1.5
-optax
 einops
+optax
+jmp
 
-# Data and tokenizers
+# Remote logging
+wandb
+
+# Data
 datasets
 tokenizers
-torch
-lmdb
-tqdm
 
-# Other
 click
 pyyaml
-pydantic
-matplotlib
-modal
+tqdm
 
-# Dev-Ops
+# CI and Dev-Ops
 mypy
+black
 flake8
-pytest
 isort
+pytest

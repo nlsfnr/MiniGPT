@@ -1,0 +1,40 @@
+dataset:
+  args: [c4, en]
+  kwargs: {split: train}
+
+tokenizer:
+  args: [bert-base-uncased]
+  kwargs: {}
+
+data:
+  length: 32
+  min_length: 24
+  pad_token_id: 0
+  batch_size: 32
+  shuffle_buffer_size: 10_000
+
+model:
+  num_layers: 4
+  vocabulary_size: 32_768
+  embedding_dim: 128
+  model_dim: 512
+  num_heads: 8
+  pos_emb_portion: 0.5
+  hidden_dim: 2_048
+  dropout: 0.0
+
+optimizer:
+  gradient_accumulation_steps: 1
+  weight_decay: 0.01
+  lr_min: 0.00006
+  lr_max: 0.0006
+  lr_decay_steps: 100_000
+  lr_warmup_steps: 100
+  gradient_clip_norm: 1.0
+  adam_b1: 0.9
+  adam_b2: 0.995
+
+mixed_precision:
+  enable: true
+  initial_scale_log2: 10
+  scale_period: 1000
