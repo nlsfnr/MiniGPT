@@ -144,7 +144,7 @@ def train(
             loss=float(jnp.mean(loss)),
             gradients=to_cpu(gradients) if gradients is not None else None,
             params=to_cpu(gffd(params)) if log_params else None,
-            gradients_finite=bool(gradients_finite),
+            gradients_finite=bool(gffd(gradients_finite)),
         )
         if save_directory is not None:
             assert save_frequency is not None
