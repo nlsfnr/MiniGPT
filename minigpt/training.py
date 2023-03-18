@@ -142,7 +142,7 @@ def train(
         yield TrainStep(
             step=step,
             loss=float(jnp.mean(loss)),
-            gradients=to_cpu(gradients) if gradients is not None else None,
+            gradients=to_cpu(gffd(gradients)) if gradients is not None else None,
             params=to_cpu(gffd(params)) if log_params else None,
             gradients_finite=bool(gffd(gradients_finite)),
         )

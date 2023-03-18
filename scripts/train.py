@@ -95,10 +95,7 @@ def train_new(
         rng_key = cp.rng_key
         params = cp.params
         opt_state = cp.opt_state
-        if wandb_disable:
-            run = None
-        else:
-            run = minigpt.load_wandb_run(path=load_from)
+        run = None if wandb_disable else minigpt.load_wandb_run(path=load_from)
     elif config_path is not None and load_from is None:
         # ...or create a new one
         if seed is None:
@@ -106,19 +103,18 @@ def train_new(
         config = minigpt.Config.from_yaml(config_path)
         rng_key = params = opt_state = None
         step = 0
-        if wandb_disable:
-            run = None
-        else:
-            run = minigpt.new_wandb_run(
+        run = (
+            None
+            if wandb_disable else
+            minigpt.new_wandb_run(
                 project=wandb_project,
                 tags=wandb_tags,
                 group=wandb_group,
                 name=wandb_name,
-                notes=pformat(config.to_dict()),
+                notes=pformat(config.to_dict()))
             )
     else:
         raise ValueError("Must specify either config-path or load-from")
-
     batches_fn = lambda: islice(
         minigpt.batches_from_config(config, seed + 1), step, None
     )
@@ -144,8 +140,9 @@ def train_new(
                 frequency=log_time_per_step_frequency,
                 percentiles=log_time_per_step_percentiles,
             )
-            if run is not None:
-                events = minigpt.log_to_wandb(events=events, run=run)
+            events = (minigpt.log_to_wandb(events=events, run=run)
+                      if run is not None else
+                      events)
             events = minigpt.detect_anomalies(events=events)
             events = minigpt.save_to_directory(events=events)
             for _ in events:

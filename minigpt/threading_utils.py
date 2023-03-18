@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import threading
-from queue import Full, Queue
+from queue import Full, Queue, Empty
 from typing import Any, Callable, Generic, Iterable, Optional, TypeVar, Union
 
 T = TypeVar("T")
 
 
-class EndOfQueue:
+class _EndOfQueue:
     pass
 
 
-_END_OF_QUEUE = EndOfQueue()
+_END_OF_QUEUE = _EndOfQueue()
 
 
 class BufferedIterator(threading.Thread, Generic[T]):
@@ -25,7 +25,7 @@ class BufferedIterator(threading.Thread, Generic[T]):
         self.iterator_fn = iterator_fn
         self.timeout = timeout
         self._exception: Optional[Exception] = None
-        self._queue: Queue[Union[EndOfQueue, T]] = Queue(buffer_size)
+        self._queue: Queue[Union[_EndOfQueue, T]] = Queue(buffer_size)
         self._termination_event = threading.Event()
 
     def run(self) -> None:
@@ -58,10 +58,17 @@ class BufferedIterator(threading.Thread, Generic[T]):
     def __enter__(self) -> Iterable[T]:
         self.start()
         while True:
-            x = self._queue.get()
+            while True:
+                if self._exception is not None:
+                    raise self._exception
+                try:
+                    x = self._queue.get(timeout=self.timeout)
+                    break
+                except Empty:
+                    continue
             if x is _END_OF_QUEUE:
                 break
-            assert not isinstance(x, EndOfQueue)
+            assert not isinstance(x, _EndOfQueue)
             yield x
 
     def __exit__(self, *_: Any) -> None:
