@@ -61,7 +61,9 @@ class MultiHeadAttention(hk.Module):
         mask: Optional[Array] = None,
     ) -> Array:
         # Constants
-        *_, D, H = *x.shape, self.num_heads
+        D, H = x.shape[-1], self.num_heads
+        if D % H != 0:
+            raise ValueError(f"Dimension {D} must be divisible by number of heads {H}")
         K = D // H
         # Projections
         projection = partial(hk.Linear, with_bias=False)
