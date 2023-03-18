@@ -74,4 +74,4 @@ class BufferedIterator(threading.Thread, Generic[T]):
     def __exit__(self, *_: Any) -> None:
         if self.is_alive():
             self._termination_event.set()
-            self.join()
+        self.join()
