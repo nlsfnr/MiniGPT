@@ -219,7 +219,7 @@ def _loss_fn(
     model = nn.Model.from_config(config)
     inputs = indices[:, :-1]
     seq_len = inputs.shape[1]
-    mask = jnp.tril(jnp.full((1, 1, seq_len, seq_len), True, dtype=bool))
+    mask = jnp.tril(jnp.full((seq_len, seq_len), True, dtype=bool))
     logits = model(inputs, is_training=True, mask=mask)
     loss = jnp.mean(
         optax.softmax_cross_entropy_with_integer_labels(logits, indices[:, 1:])
@@ -267,7 +267,8 @@ def _get_loss_scale(
         return jmp.NoOpLossScale()
     return jmp.DynamicLossScale(
         loss_scale=jnp.asarray(
-            2**config.mixed_precision.initial_scale_log2, dtype=jnp.float32
+            2**config.mixed_precision.initial_scale_log2,
+            dtype=jnp.float32,
         ),
         counter=jnp.asarray(step, dtype=jnp.int32),
         period=config.mixed_precision.scale_period,

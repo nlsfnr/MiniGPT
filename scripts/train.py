@@ -105,14 +105,15 @@ def train_new(
         step = 0
         run = (
             None
-            if wandb_disable else
-            minigpt.new_wandb_run(
+            if wandb_disable
+            else minigpt.new_wandb_run(
                 project=wandb_project,
                 tags=wandb_tags,
                 group=wandb_group,
                 name=wandb_name,
-                notes=pformat(config.to_dict()))
+                notes=pformat(config.to_dict()),
             )
+        )
     else:
         raise ValueError("Must specify either config-path or load-from")
     batches_fn = lambda: islice(
@@ -140,9 +141,11 @@ def train_new(
                 frequency=log_time_per_step_frequency,
                 percentiles=log_time_per_step_percentiles,
             )
-            events = (minigpt.log_to_wandb(events=events, run=run)
-                      if run is not None else
-                      events)
+            events = (
+                minigpt.log_to_wandb(events=events, run=run)
+                if run is not None
+                else events
+            )
             events = minigpt.detect_anomalies(events=events)
             events = minigpt.save_to_directory(events=events)
             for _ in events:

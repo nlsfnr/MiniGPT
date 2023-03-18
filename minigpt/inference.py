@@ -1,13 +1,13 @@
-from typing import Iterator
 from functools import partial
-import jax.numpy as jnp
-import jax
+from typing import Iterator
+
 import haiku as hk
+import jax
+import jax.numpy as jnp
+from chex import Array, ArrayTree, PRNGKey
 
-from chex import ArrayTree, PRNGKey, Array
-
+from . import data, nn
 from .common import Config
-from . import nn, data
 
 
 def generate(
@@ -17,9 +17,8 @@ def generate(
     rng_key: PRNGKey,
     prompt: str = "",
     temperature: float = 0.8,
-    top_p: float = 0.95
+    top_p: float = 0.95,
 ) -> Iterator[str]:
-
     def fn(
         *,
         indices: Array,
@@ -27,7 +26,7 @@ def generate(
     ) -> Array:
         model = nn.Model.from_config(config)
         seq_len = indices.shape[1]
-        mask = jnp.tril(jnp.full((1, 1, seq_len, seq_len), True, dtype=bool))
+        mask = jnp.tril(jnp.full((seq_len, seq_len), True, dtype=bool))
         logits = model(indices, is_training=False, mask=mask)
         logits = logits[:, -1, :] / temperature
         probs = jax.nn.softmax(logits)
@@ -35,8 +34,7 @@ def generate(
 
     # Prepare the tokenizer and the initial indices.
     tokenizer = data.tokenizer_from_config(config)
-    indices_with_eos = tokenizer.encode(prompt).ids
-    *indices, eos_token_id = indices_with_eos
+    *indices, eos_token_id = tokenizer.encode(prompt).ids
     # Prepare the model function.
     model_fn = partial(hk.without_apply_rng(hk.transform(fn)).apply, params)
     # Run the model.

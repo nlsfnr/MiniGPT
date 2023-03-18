@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from queue import Full, Queue, Empty
+from queue import Empty, Full, Queue
 from typing import Any, Callable, Generic, Iterable, Optional, TypeVar, Union
 
 T = TypeVar("T")
@@ -72,5 +72,6 @@ class BufferedIterator(threading.Thread, Generic[T]):
             yield x
 
     def __exit__(self, *_: Any) -> None:
-        self._termination_event.set()
-        self.join()
+        if self.is_alive():
+            self._termination_event.set()
+            self.join()

@@ -51,6 +51,14 @@ class MultiHeadAttention(hk.Module):
         pos_emb_portion: float,
         name: str,
     ) -> None:
+        """Multi-head attention.
+
+        Args:
+            num_heads: Number of attention heads.
+            pos_emb_portion: Portion of the dimension to use for rotary positional
+                embeddings.
+            name: Name of the module.
+        """
         super().__init__(name=name)
         self.num_heads = num_heads
         self.pos_emb_portion = pos_emb_portion
@@ -60,6 +68,17 @@ class MultiHeadAttention(hk.Module):
         x: Array,
         mask: Optional[Array] = None,
     ) -> Array:
+        """Applies multi-head attention.
+
+        Args:
+            x: Input array of shape [batch, sequence, features].
+            mask: Mask array of shape [sequence, sequence]. If
+                provided, the attention will be masked out for the masked tokens. The
+                mask should be broadcastable to the shape of the attention logits.
+
+        Returns:
+            Output array of shape [batch, sequence, features].
+        """
         # Constants
         D, H = x.shape[-1], self.num_heads
         if D % H != 0:
@@ -85,7 +104,9 @@ class MultiHeadAttention(hk.Module):
         l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
 
         def _logits_to_weights(l_: Array) -> Array:
+            nonlocal mask
             if mask is not None:
+                mask = jnp.broadcast_to(mask, l_.shape)  # B 1 L L
                 l_ = hk.remat(jnp.where)(mask, l_, -1e30)
             return jax.nn.softmax(l_, axis=-1)  # B H L L
 
@@ -153,11 +174,11 @@ class Block(hk.Module):
         ff_ln = hk.remat(hk.LayerNorm(-1, True, False, name="ff_ln"))
         # Multi-head attention
         y = mha(mha_ln(x), mask)
-        y = (hk.dropout(hk.next_rng_key(), self.dropout, y) if is_training else y)
+        y = hk.dropout(hk.next_rng_key(), self.dropout, y) if is_training else y
         x = x + y
         # Feed-forward
         z = ff(ff_ln(x))
-        z = (hk.dropout(hk.next_rng_key(), self.dropout, z) if is_training else z)
+        z = hk.dropout(hk.next_rng_key(), self.dropout, z) if is_training else z
         out = x + z
         return out
 
@@ -240,7 +261,7 @@ class Model(hk.Module):
         )
         # Execution
         embeddings = embedding(indices)
-        h = embedding_proj(embeddings)
+        h = embedding_proj(embeddings)  # type: ignore
         for block in blocks:
             h = block(h, is_training, mask)
         final_hidden = out_proj(out_ln(h))
