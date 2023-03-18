@@ -84,7 +84,7 @@ class MultiHeadAttention(hk.Module):
 
         def _logits_to_weights(l_: Array) -> Array:
             if mask is not None:
-                l_ = hk.remat(jnp.where)(mask, l_, -1e8)
+                l_ = hk.remat(jnp.where)(mask, l_, -1e30)
             return jax.nn.softmax(l_, axis=-1)  # B H L L
 
         a = full_precision(_logits_to_weights)(l)  # B H L L
@@ -151,13 +151,11 @@ class Block(hk.Module):
         ff_ln = hk.remat(hk.LayerNorm(-1, True, False, name="ff_ln"))
         # Multi-head attention
         y = mha(mha_ln(x), mask)
-        if is_training:
-            y = hk.dropout(hk.next_rng_key(), self.dropout, y)
+        y = (hk.dropout(hk.next_rng_key(), self.dropout, y) if is_training else y)
         x = x + y
         # Feed-forward
         z = ff(ff_ln(x))
-        if is_training:
-            z = hk.dropout(hk.next_rng_key(), self.dropout, z)
+        z = (hk.dropout(hk.next_rng_key(), self.dropout, z) if is_training else z)
         out = x + z
         return out
 
@@ -219,7 +217,7 @@ class Model(hk.Module):
                 name="embedding_proj",
             )
             if self.embedding_dim != self.model_dim
-            else None
+            else lambda x: x
         )
         blocks = [
             Block(
@@ -240,10 +238,9 @@ class Model(hk.Module):
         )
         # Execution
         embeddings = embedding(indices)
-        h = embedding_proj(embeddings) if embedding_proj is not None else embeddings
+        h = embedding_proj(embeddings)
         for block in blocks:
             h = block(h, is_training, mask)
-        # Output
         final_hidden = out_proj(out_ln(h))
         logits = jnp.einsum("b s m, v m -> b s v", final_hidden, embedding.embeddings)
         return logits
