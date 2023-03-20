@@ -312,7 +312,18 @@ def _get_optimizer(
         ),
         optax.scale_by_schedule(lr_schedule),
     )
-    return optax.MultiSteps(optimizer, cfg.gradient_accumulation_steps)
+
+    # gas = gradient accumulation steps
+    step_gas_pairs = tuple(config.optimizer.gradient_accumulation_steps)
+    assert all(isinstance(s, int) and isinstance(g, int) for s, g in step_gas_pairs)
+    assert all(s >= 0 and g > 0 for s, g in step_gas_pairs)
+    pairs = sorted(step_gas_pairs, key=lambda x: x[0])
+    steps, gass = map(jnp.array, zip(*pairs))
+
+    def _gradient_accumulation_steps_schedule(step: Array) -> Array:
+        return jnp.max(jnp.where(steps <= step, gass, 1)) 
+
+    return optax.MultiSteps(optimizer, _gradient_accumulation_steps_schedule)
 
 
 def _get_loss_scale(

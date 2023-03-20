@@ -5,3 +5,4 @@ tokenizers/
 wandb/
 zoo/
 *.log
+.tmp-checkpoint/
