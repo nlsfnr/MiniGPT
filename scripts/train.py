@@ -117,7 +117,7 @@ def train_new(
     else:
         raise ValueError("Must specify either config-path or load-from")
     batches_fn = lambda: islice(
-        minigpt.batches_from_config(config, seed + 1), step, None
+        minigpt.batches_from_config(config, seed + 1, extra_length=1), step, None
     )
     with minigpt.BufferedIterator(batches_fn, data_buffer) as batches:
         train_fn = partial(

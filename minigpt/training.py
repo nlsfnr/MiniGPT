@@ -25,12 +25,8 @@ ArrayTreeT = TypeVar("ArrayTreeT", bound=ArrayTree)
 T = TypeVar("T")
 
 
-class Event:
-    pass
-
-
 @dataclass
-class TrainStep(Event):
+class TrainStep:
     step: int
     loss: float
     gradients_finite: bool
@@ -40,7 +36,7 @@ class TrainStep(Event):
 
 
 @dataclass
-class Save(Event):
+class Save:
     path: Path
     step: int
     config: Config
@@ -51,7 +47,18 @@ class Save(Event):
     seed: int
 
 
+Event = Union[TrainStep, Save]
+
+
 def to_cpu(t: ArrayTreeT) -> ArrayTreeT:
+    """Move a Jax array tree to the CPU.
+
+    Args:
+        t: Array tree to move to the CPU.
+
+    Returns:
+        Array tree on the CPU.
+    """
     if t is None:
         return t
     cpu = jax.devices("cpu")[0]
@@ -74,6 +81,26 @@ def train(
     log_params_frequency: Optional[int] = None,
     log_param_size_on_init: bool = True,
 ) -> Iterable[Event]:
+    """The training loop.
+
+    Args:
+        config: Configuration.
+        seed: Seed to use to initiate the training loop.
+        rng_key: Current random number generator key to use, corresponding to the current step.
+        params: Parameters to use.
+        opt_state: Optimizer state to use.
+        loss_scale: Loss scale to use.
+        step: The current step of the training loop.
+        batches: Iterable of batches to use.
+        save_frequency: Frequency at which to send a `Save` event.
+        save_directory: Directory to specify for the `Save` event.
+        log_gradients_frequency: Frequency at which to send a `TrainStep` event with gradients.
+        log_params_frequency: Frequency at which to send a `TrainStep` event with parameters.
+        log_param_size_on_init: Whether to log the parameter size on initialization.
+
+    Yields:
+        Training events. Can be either a `TrainStep` or a `Save`.
+    """
     if rng_key is None:
         rng_key = jax.random.PRNGKey(seed)
     if params is None:
@@ -85,7 +112,7 @@ def train(
     if loss_scale is None:
         loss_scale = _get_loss_scale(config, step)
     if batches is None:
-        batches = islice(data.batches_from_config(config, seed + 2), step, None)
+        batches = islice(data.batches_from_config(config, seed + 2, extra_length=1), step, None)
     batches = map(partial(jnp.asarray, dtype=jnp.int32), batches)
     policy = _set_amp_policy(config)
     assert params is not None
@@ -182,6 +209,22 @@ def _train_step(
     axis_name: str,
     with_gradients: bool,
 ) -> _TrainStepRV:
+    """Performs a single training step.
+
+    Args:
+        indices: Indices of the batch to use.
+        params: Parameters to use.
+        opt_state: Optimizer state to use.
+        loss_scale: Loss scale to use.
+        rng_key: Random key to use.
+        config: Configuration to use.
+        axis_name: Axis name across which gradients are averaged.
+        with_gradients: Whether to return gradients.
+
+    Returns:
+        A tuple of the new parameters, optimizer state, loss scale, loss, gradients, and whether
+        gradients are finite.
+    """
     loss_fn = hk.transform(partial(_loss_fn, config=config)).apply
     grad_fn = jax.grad(loss_fn, has_aux=True)
     optimizer = _get_optimizer(config)
@@ -216,14 +259,27 @@ def _loss_fn(
     loss_scale: jmp.LossScale,
     config: Config,
 ) -> Tuple[Array, _LossFnAux]:
+    """Computes the loss for a batch.
+
+    Args:
+        indices: Indices of the batch to use.
+        loss_scale: Loss scale to use.
+        config: Configuration to use.
+
+    Returns:
+        A tuple of the loss and a named tuple of auxiliary values.
+    """
+    # Prepare the model and data
     model = nn.Model.from_config(config)
     inputs = indices[:, :-1]
+    targets = indices[:, 1:]
     seq_len = inputs.shape[1]
     mask = jnp.tril(jnp.full((seq_len, seq_len), True, dtype=bool))
+    is_valid = (targets != config.data.pad_token_id).astype(jnp.float32)
+    # Compute the loss
     logits = model(inputs, is_training=True, mask=mask)
-    loss = jnp.mean(
-        optax.softmax_cross_entropy_with_integer_labels(logits, indices[:, 1:])
-    )
+    losses = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
+    loss = jnp.mean(losses * is_valid) / jnp.mean(is_valid)
     return loss_scale.scale(loss), _LossFnAux(loss=loss)
 
 
@@ -276,7 +332,6 @@ def _get_loss_scale(
 
 
 def _set_amp_policy(config: Config) -> jmp.Policy:
-    """Get and set the policy for mixed precision training."""
     full = jnp.dtype(jnp.float32)
     half = jnp.dtype(jnp.float16 if config.mixed_precision.enable else jnp.float32)
     half_policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=half)
@@ -298,9 +353,4 @@ def _broadcast_to_devices(obj: T) -> T:
 
 def _get_from_first_device(obj: T) -> T:
     fn = lambda x: x[0] if isinstance(x, Array) else x
-    return jax.tree_util.tree_map(fn, obj)
-
-
-def _concat_from_devices(obj: T) -> T:
-    fn = lambda x: rearrange(x, "d b ... -> (d b) ...") if isinstance(x, Array) else x
     return jax.tree_util.tree_map(fn, obj)

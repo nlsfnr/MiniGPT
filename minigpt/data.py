@@ -255,11 +255,18 @@ def shuffle(
 def batches_from_config(
     config: Config,
     seed: int,
+    extra_length: int = 0,
 ) -> Iterable[np.ndarray]:
     """Pipeline to load batches from a configuration.
 
     Args:
         config: Configuration to use.
+        seed: Seed to use for shuffling.
+        extra_length: Extra length to add to the samples. This is useful for
+            training with a causal language model, where the decoder needs to
+            predict the next token. In this case, the extra length should be
+            set to 1 since the model's input will be the first `length - 1`
+            tokens and the target will be the last `length - 1` tokens.
 
     Returns:
         Iterable of batches.
@@ -276,8 +283,8 @@ def batches_from_config(
     dataset = tokenize_samples(dataset, tokenizer)
     dataset = truncate_and_pad(
         samples=dataset,
-        length=config.data.length,
-        min_length=config.data.min_length,
+        length=config.data.length + extra_length,
+        min_length=config.data.min_length + extra_length,
         pad_token_id=config.data.pad_token_id,
     )
     dataset = shuffle(
