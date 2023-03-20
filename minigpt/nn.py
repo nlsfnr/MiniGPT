@@ -134,13 +134,11 @@ class FeedForward(hk.Module):
         model_dim = x.shape[-1]
         # Projections
         projection = partial(hk.Linear, with_bias=False)
-        w1 = projection(self.hidden_dim, name="w1")
-        w2 = projection(self.hidden_dim, name="w2")
-        w3 = projection(model_dim, name="w3")
-        # PaLM-like SwiGLU
-        a, b = w1(x), w2(x)
-        h = hk.remat(lambda a_, b_: jax.nn.silu(a_) * b_)(a, b)
-        y = w3(h)  # B L M
+        in_proj = projection(self.hidden_dim, name="in_proj")
+        out_proj = projection(model_dim, name="out_proj")
+        # Feed-forward
+        h = hk.remat(jax.nn.gelu)(in_proj(x))  # B L H
+        y = out_proj(h)  # B L M
         return y
 
 
