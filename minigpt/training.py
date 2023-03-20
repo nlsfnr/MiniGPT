@@ -112,7 +112,9 @@ def train(
     if loss_scale is None:
         loss_scale = _get_loss_scale(config, step)
     if batches is None:
-        batches = islice(data.batches_from_config(config, seed + 2, extra_length=1), step, None)
+        batches = islice(
+            data.batches_from_config(config, seed + 2, extra_length=1), step, None
+        )
     batches = map(partial(jnp.asarray, dtype=jnp.int32), batches)
     policy = _set_amp_policy(config)
     assert params is not None
@@ -321,7 +323,7 @@ def _get_optimizer(
     steps, gass = map(jnp.array, zip(*pairs))
 
     def _gradient_accumulation_steps_schedule(step: Array) -> Array:
-        return jnp.max(jnp.where(steps <= step, gass, 1)) 
+        return jnp.max(jnp.where(steps <= step, gass, 1))
 
     return optax.MultiSteps(optimizer, _gradient_accumulation_steps_schedule)
 
