@@ -95,7 +95,19 @@ def train_new(
         rng_key = cp.rng_key
         params = cp.params
         opt_state = cp.opt_state
-        run = None if wandb_disable else minigpt.load_wandb_run(path=load_from)
+        if wandb_disable:
+            run = None
+        else:
+            try:
+                run = minigpt.load_wandb_run(path=load_from)
+            except FileNotFoundError:
+                run = minigpt.new_wandb_run(
+                    project=wandb_project,
+                    tags=wandb_tags,
+                    group=wandb_group,
+                    name=wandb_name,
+                    notes=pformat(config.to_dict()),
+                )
     elif config_path is not None and load_from is None:
         # ...or create a new one
         if seed is None:
