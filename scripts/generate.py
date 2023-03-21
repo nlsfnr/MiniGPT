@@ -31,7 +31,7 @@ def cli(
               help="Random seed. Default 0.")
 @click.option("--temperature", "-t", type=float, default=1.0,
               help="Temperature. Default 1.0.")
-@click.option("--top-p", "-t", type=float, default=0.95,
+@click.option("--top-p", "-m", type=float, default=0.95,
               help="Threshold for sampling tokens. Default 0.95.")
 # fmt: on
 def cli_generate(

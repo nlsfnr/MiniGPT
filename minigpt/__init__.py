@@ -1,6 +1,6 @@
 from .common import Config, get_logger, set_debug, setup_logging
 from .data import batches_from_config
-from .inference import generate
+from .inference import generate, perplexity
 from .nn import Model
 from .sidecar import (
     detect_anomalies,
@@ -31,6 +31,7 @@ __all__ = (
     "log_time_per_step",
     "log_to_wandb",
     "new_wandb_run",
+    "perplexity",
     "save_to_directory",
     "set_debug",
     "setup_logging",

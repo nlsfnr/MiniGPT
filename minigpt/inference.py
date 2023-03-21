@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Iterator
+from typing import Iterator, Tuple, List
 
 import haiku as hk
 import jax
@@ -63,3 +63,30 @@ def _sample_from_top_p(
     subkeys = jax.random.split(rng_key, probs.shape[0])
     indices = jax.vmap(jax.random.choice)(subkeys, indices, p=probs)
     return indices
+
+
+def perplexity(
+    *,
+    config: Config,
+    params: ArrayTree,
+    text: str,
+) -> Tuple[Array, Array, List[str]]:
+
+    def fn(
+        *,
+        indices: Array,  # S
+    ) -> Array:
+        model = nn.Model.from_config(config)
+        seq_len = indices.shape[0]
+        mask = jnp.tril(jnp.full((seq_len, seq_len), True, dtype=bool))
+        logits = model(indices[None, :], is_training=False, mask=mask)[0]
+        return logits  # S V
+
+    tokenizer = data.tokenizer_from_config(config)
+    model_fn = partial(hk.without_apply_rng(hk.transform(fn)).apply, params)
+    indices = jnp.asarray(tokenizer.encode(text).ids, dtype=jnp.int32)
+    logits = model_fn(indices=indices)
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    selected_log_probs = jnp.take_along_axis(log_probs, indices[..., None], axis=-1)
+    tokens = [tokenizer.id_to_token(int(i)) for i in indices]
+    return -selected_log_probs, indices, tokens
