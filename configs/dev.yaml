@@ -11,10 +11,10 @@ data:
   min_length: 24
   pad_token_id: 0
   batch_size: 32
-  shuffle_buffer_size: 10_000
+  shuffle_buffer_size: 25_000
 
 model:
-  num_layers: 4
+  num_layers: 8
   vocabulary_size: 32_768
   embedding_dim: 128
   model_dim: 512

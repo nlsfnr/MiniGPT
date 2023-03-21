@@ -1,15 +1,18 @@
+import contextlib
+import io
 import os
 import pickle
-import shutil
 import statistics
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple
 
 import numpy as np
 import optax
 from chex import Array, ArrayTree, PRNGKey
 from wandb.sdk.wandb_run import Run as WandbRun
+import yaml
 
 import wandb
 
@@ -113,6 +116,20 @@ def _find_anomalies(
         raise TypeError(f"Unexpected type {type(x)}")
 
 
+@contextlib.contextmanager
+def atomic_open(path: Path, mode: str = "w") -> Generator[io.IOBase, None, None]:
+    f = tempfile.NamedTemporaryFile(mode=mode, dir=path.parent, delete=False)
+    try:
+        yield f  # type: ignore
+        f.close()
+        os.replace(f.name, path)
+    except:
+        raise
+    finally:
+        if os.path.exists(f.name):
+            os.remove(f.name)
+
+
 def save_to_directory(
     *,
     events: Iterable[Event],
@@ -122,27 +139,19 @@ def save_to_directory(
             yield event
             continue
         path = Path(event.path)
-        tmpdir = Path(".tmp-checkpoint/")
-        tmpdir.mkdir(parents=True, exist_ok=True)
-        try:
-            event.config.to_yaml(tmpdir / "config.yaml")
-            with open(tmpdir / "params.pkl", "wb") as f:
-                pickle.dump(event.params, f)
-            with open(tmpdir / "opt_state.pkl", "wb") as f:
-                pickle.dump(event.opt_state, f)
-            with open(tmpdir / "rng_key.pkl", "wb") as f:
-                pickle.dump(event.rng_key, f)
-            with open(tmpdir / "step.txt", "w") as f:
-                f.write(str(event.step))
-            with open(tmpdir / "seed.txt", "w") as f:
-                f.write(str(event.seed))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                shutil.rmtree(path)
-            os.rename(tmpdir, path)
-        finally:
-            if tmpdir.exists():
-                shutil.rmtree(tmpdir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event.config.to_yaml(path / "config.yaml")
+        with atomic_open(path / "params.pkl", "wb") as f:
+            pickle.dump(event.params, f)
+        with atomic_open(path / "opt_state.pkl", "wb") as f:
+            pickle.dump(event.opt_state, f)
+        with atomic_open(path / "rng_key.pkl", "wb") as f:
+            pickle.dump(event.rng_key, f)
+        with atomic_open(path / "step.txt", "w") as f:
+            f.write(str(event.step))
+        with atomic_open(path / "seed.txt", "w") as f:
+            f.write(str(event.seed))
+        path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(f"Step: {event.step:>6} | Saved model to {path}")
         yield event
 
@@ -192,8 +201,8 @@ def log_to_wandb(
     for event in events:
         if isinstance(event, Save):
             event.path.mkdir(parents=True, exist_ok=True)
-            with open(event.path / "wandb-run-id.txt", "w") as f:
-                f.write(run.id)
+            with atomic_open(event.path / "wandb-run.yaml", "w") as f:
+                yaml.dump(dict(id=run.id, project=run.project, group=run.group), f)
         elif isinstance(event, TrainStep):
             data: Dict[str, Any] = dict(loss=event.loss)
             if event.gradients is not None:
@@ -210,9 +219,9 @@ def load_wandb_run(
     *,
     path: Path,
 ) -> WandbRun:
-    with open(path / "wandb-run-id.txt") as f:
-        run_id = f.read().strip()
-    run = wandb.init(id=run_id, resume="allow")
+    with open(path / "wandb-run.yaml") as f:
+        run_data = dict(yaml.safe_load(f))
+    run = wandb.init(**run_data, resume="must")
     assert isinstance(run, WandbRun)
     return run
 

@@ -11,7 +11,7 @@ data:
   min_length: 192
   pad_token_id: 0
   batch_size: 32
-  shuffle_buffer_size: 10_000
+  shuffle_buffer_size: 25_000
 
 model:
   num_layers: 12
@@ -24,11 +24,11 @@ model:
   dropout: 0.0
 
 optimizer:
-  gradient_accumulation_steps: [[0, 1], [5_000, 2], [10_000, 4], [25_000, 8], [50_000, 32]]
+  gradient_accumulation_steps: [[0, 1], [10_000, 2], [25_000, 8], [50_000, 32], [100_000, 64]]
   weight_decay: 0.01
   lr_min: 0.00006
   lr_max: 0.0006
-  lr_decay_steps: 100_000
+  lr_decay_steps: 500_000
   lr_warmup_steps: 1_000
   gradient_clip_norm: 1.0
   adam_b1: 0.9

@@ -92,27 +92,21 @@ class MultiHeadAttention(hk.Module):
         o_proj = projection(D, name="o_proj")
         # Q, K, V
         p = int(K * self.pos_emb_portion)
-        q = q_proj(x) / K**0.5  # B L H K
+        q: Array = q_proj(x) / K**0.5  # B L H K
         q = rearrange(q, "b l (h k) -> b h l k", h=H)
         q = jnp.concatenate([rotary_pos_emb(q[..., :p]), q[..., p:]], axis=-1)
-        k = k_proj(x)  # B L H K
+        k: Array = k_proj(x)  # B L H K
         k = rearrange(k, "b l (h k) -> b h l k", h=H)
         k = jnp.concatenate([rotary_pos_emb(k[..., :p]), k[..., p:]], axis=-1)
-        v = v_proj(x)  # B L H V
+        v: Array = v_proj(x)  # B L H V
         v = rearrange(v, "b l (h v) -> b h l v", h=H)
         # Attention weights
         l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
-
-        def _logits_to_weights(l_: Array) -> Array:
-            nonlocal mask
-            if mask is not None:
-                mask = jnp.broadcast_to(mask, l_.shape)  # B 1 L L
-                l_ = hk.remat(jnp.where)(mask, l_, -1e30)
-            return jax.nn.softmax(l_, axis=-1)  # B H L L
-
-        a = full_precision(_logits_to_weights)(l)  # B H L L
+        _apply_mask = lambda l_, m_: (l_ if m_ is None else jnp.where(m_, l_, -1e8))
+        l = hk.remat(_apply_mask)(l, mask)
+        a = full_precision(jax.nn.softmax)(l)  # B H L L
         # Attention output
-        y = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
+        y: Array = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)
         o = o_proj(y)  # B L M
         return o
@@ -263,7 +257,9 @@ class Model(hk.Module):
         for block in blocks:
             h = block(h, is_training, mask)
         final_hidden = out_proj(out_ln(h))
-        logits = jnp.einsum("b s m, v m -> b s v", final_hidden, embedding.embeddings)
+        logits: Array = jnp.einsum(
+            "b s m, v m -> b s v", final_hidden, embedding.embeddings
+        )
         return logits
 
     @classmethod

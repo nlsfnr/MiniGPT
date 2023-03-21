@@ -138,6 +138,7 @@ def tokenize_samples(
     def tokenizer_fn(texts: Sequence[str]) -> Sequence[Sequence[int]]:
         return [enc.ids for enc in tokenizer.encode_batch(texts)]
 
+    samples = map(dict, samples)
     samples, samples_ = itertools.tee(samples)
     texts = chunks((sample[input_key] for sample in samples_), batch_size)
     batched_indices = (tokenizer_fn(text) for text in texts)
@@ -168,6 +169,7 @@ def truncate_and_pad(
         Truncated and padded samples.
     """
     for sample in samples:
+        sample = dict(sample)
         ids = sample[input_key]
         for chunk in chunks(ids, length):
             if len(chunk) < min_length:
@@ -242,12 +244,13 @@ def shuffle(
     rng = random.Random(seed)
     buffer: List[Sample] = []
     for sample in samples:
+        sample = dict(sample)
         if len(buffer) < buffer_size:
             buffer.append(sample)
         else:
             index = rng.randrange(len(buffer))
-            buffer[index], sample = sample, buffer[index]
-            yield sample
+            buffer[index], x = sample, buffer[index]
+            yield x
     rng.shuffle(buffer)
     yield from buffer
 

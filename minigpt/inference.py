@@ -29,7 +29,7 @@ def generate(
         mask = jnp.tril(jnp.full((seq_len, seq_len), True, dtype=bool))
         logits = model(indices, is_training=False, mask=mask)
         logits = logits[:, -1, :] / temperature
-        probs = jax.nn.softmax(logits)
+        probs = jax.nn.softmax(logits - jnp.max(logits, axis=-1, keepdims=True))
         return _sample_from_top_p(probs=probs, p=top_p, rng_key=subkey)
 
     # Prepare the tokenizer and the initial indices.
