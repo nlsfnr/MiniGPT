@@ -104,7 +104,7 @@ class MultiHeadAttention(hk.Module):
         l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
         _apply_mask = lambda l_, m_: (l_ if m_ is None else jnp.where(m_, l_, -1e8))
         l = hk.remat(_apply_mask)(l, mask)
-        a = full_precision(jax.nn.softmax)(l)  # B H L L
+        a = jax.nn.softmax(l)  # B H L L
         # Attention output
         y: Array = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)
