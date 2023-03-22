@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Iterator, Tuple, List
+from typing import Iterator, List, Tuple
 
 import haiku as hk
 import jax
@@ -71,7 +71,6 @@ def perplexity(
     params: ArrayTree,
     text: str,
 ) -> Tuple[Array, Array, List[str]]:
-
     def fn(
         *,
         indices: Array,  # S

@@ -36,5 +36,5 @@ optimizer:
 
 mixed_precision:
   enable: true
-  initial_scale_log2: 10
+  initial_scale_log2: 30
   scale_period: 1000

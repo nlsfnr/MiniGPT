@@ -34,7 +34,9 @@ def rotary_pos_emb(
     grid = jnp.einsum("s, d -> s d", jnp.arange(seq), inv_freqs)  # S D/2
     # Eq. 34 in https://arxiv.org/abs/2104.09864
     sin_embs = repeat(jnp.sin(grid), "s d -> 1 s (d 2)")  # B S D
+    sin_embs = sin_embs.astype(x.dtype)
     cos_embs = repeat(jnp.cos(grid), "s d -> 1 s (d 2)")  # B S D
+    cos_embs = cos_embs.astype(x.dtype)
     # Pairwise swap with alternating signs
     x1, x2 = x[..., ::2], x[..., 1::2]  # [x1, x3, x5, ...], [x2, x4, x6, ...]
     x1x2 = jnp.stack([-x2, x1], axis=-1)  # [[-x2, x1], [-x4, x3], ...]
@@ -101,10 +103,15 @@ class MultiHeadAttention(hk.Module):
         v: Array = v_proj(x)  # B L H V
         v = rearrange(v, "b l (h v) -> b h l v", h=H)
         # Attention weights
+
+        def _logits_to_weights(l: Array) -> Array:
+            _apply_mask = lambda l_, m_: (l_ if m_ is None else jnp.where(m_, l_, -1e8))
+            l = hk.remat(_apply_mask)(l, mask)
+            a = jax.nn.softmax(l)  # B H L L
+            return a
+
         l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
-        _apply_mask = lambda l_, m_: (l_ if m_ is None else jnp.where(m_, l_, -1e8))
-        l = hk.remat(_apply_mask)(l, mask)
-        a = jax.nn.softmax(l)  # B H L L
+        a = full_precision(_logits_to_weights)(l)
         # Attention output
         y: Array = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)

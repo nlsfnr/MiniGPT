@@ -30,6 +30,7 @@ class TrainStep:
     step: int
     loss: float
     gradients_finite: bool
+    loss_scale_log2: float
     gradients: Optional[ArrayTree] = None
     params: Optional[ArrayTree] = None
     timestamp: datetime = field(default_factory=datetime.now)
@@ -174,6 +175,7 @@ def train(
             gradients=to_cpu(gffd(gradients)) if gradients is not None else None,
             params=to_cpu(gffd(params)) if log_params else None,
             gradients_finite=bool(gffd(gradients_finite)),
+            loss_scale_log2=round(float(jnp.log2(gffd(loss_scale.loss_scale)))),
         )
         if save_directory is not None:
             assert save_frequency is not None
@@ -236,6 +238,7 @@ def _train_step(
     gradients = jax.lax.pmean(gradients, axis_name=axis_name)
     gradients = loss_scale.unscale(gradients)
     gradients_finite = jmp.all_finite(gradients)
+    loss_scale = loss_scale.adjust(gradients_finite)
     updates, new_opt_state = optimizer.update(gradients, opt_state, params)
     new_params = optax.apply_updates(params, updates)
     opt_state, params = jmp.select_tree(
@@ -289,43 +292,45 @@ def _get_optimizer(
     config: Config,
 ) -> optax.MultiSteps:
     cfg = config.optimizer
-    lr_schedule = optax.join_schedules(
-        [
-            optax.linear_schedule(cfg.lr_min, cfg.lr_max, cfg.lr_warmup_steps),
+    # Assemble the lr schedule
+    parts = [optax.linear_schedule(cfg.lr_min, cfg.lr_max, cfg.lr_warmup_steps)]
+    if cfg.lr_decay_steps is None:
+        parts += [optax.constant_schedule(cfg.lr_max)]
+    else:
+        parts += [
             (
                 optax.cosine_decay_schedule(
-                    cfg.lr_max,
-                    cfg.lr_decay_steps,
-                    alpha=cfg.lr_min / cfg.lr_max,
+                    cfg.lr_max, cfg.lr_decay_steps, alpha=cfg.lr_min / cfg.lr_max
                 )
-                if cfg.lr_decay_steps is not None
-                else optax.constant_schedule(cfg.lr_max)
-            ),
-        ],
-        [cfg.lr_warmup_steps],
-    )
+            )
+        ]
+    lr_schedule = optax.join_schedules(parts, [cfg.lr_warmup_steps])
+    # Assemble the optimizer
     optimizer = optax.chain(
         optax.clip_by_global_norm(cfg.gradient_clip_norm),
-        optax.adamw(
-            learning_rate=1.0,
-            b1=cfg.adam_b1,
-            b2=cfg.adam_b2,
-            weight_decay=cfg.weight_decay,
-        ),
-        optax.scale_by_schedule(lr_schedule),
+        # Adam + weight decay = AdamW
+        optax.scale_by_adam(b1=cfg.adam_b1, b2=cfg.adam_b2),
+        optax.add_decayed_weights(weight_decay=cfg.weight_decay),
+        # We want gradient descent not ascent, so we negate the learning rate
+        optax.scale_by_schedule(lambda step: -lr_schedule(step)),
     )
-
-    # gas = gradient accumulation steps
+    # Assemble the multi-steps optimizer for GAS
     step_gas_pairs = tuple(config.optimizer.gradient_accumulation_steps)
-    assert all(isinstance(s, int) and isinstance(g, int) for s, g in step_gas_pairs)
-    assert all(s >= 0 and g > 0 for s, g in step_gas_pairs)
+    if not all(isinstance(s, int) and isinstance(g, int) for s, g in step_gas_pairs):
+        raise TypeError(
+            f"Expected gradient_accumulation_steps to be a sequence of (int, int) pairs, got "
+            f"{step_gas_pairs}"
+        )
+    if not all(s >= 0 and g > 0 for s, g in step_gas_pairs):
+        raise ValueError(
+            f"Expected gradient_accumulation_steps to be a sequence of (int, int) pairs with "
+            f"non-negative steps and positive gas, got {step_gas_pairs}"
+        )
     pairs = sorted(step_gas_pairs, key=lambda x: x[0])
     steps, gass = map(jnp.array, zip(*pairs))
-
-    def _gradient_accumulation_steps_schedule(step: Array) -> Array:
-        return jnp.max(jnp.where(steps <= step, gass, 1))
-
-    return optax.MultiSteps(optimizer, _gradient_accumulation_steps_schedule)
+    return optax.MultiSteps(
+        optimizer, lambda step: jnp.max(jnp.where(steps <= step, gass, 1))
+    )
 
 
 def _get_loss_scale(
@@ -349,8 +354,11 @@ def _set_amp_policy(config: Config) -> jmp.Policy:
     half = jnp.dtype(jnp.float16 if config.mixed_precision.enable else jnp.float32)
     half_policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=half)
     full_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=full)
-    hk.mixed_precision.set_policy(nn.Model, full_policy)
+    hk.mixed_precision.set_policy(nn.Model, half_policy)
     hk.mixed_precision.set_policy(nn.Block, half_policy)
+    hk.mixed_precision.set_policy(nn.MultiHeadAttention, half_policy)
+    hk.mixed_precision.set_policy(nn.FeedForward, half_policy)
+    hk.mixed_precision.set_policy(hk.Embed, half_policy)
     hk.mixed_precision.set_policy(hk.Linear, half_policy)
     hk.mixed_precision.set_policy(hk.LayerNorm, full_policy)
     return half_policy

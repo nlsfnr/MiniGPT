@@ -10,9 +10,9 @@ from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple
 
 import numpy as np
 import optax
+import yaml
 from chex import Array, ArrayTree, PRNGKey
 from wandb.sdk.wandb_run import Run as WandbRun
-import yaml
 
 import wandb
 
@@ -42,6 +42,9 @@ def log_losses(
             )
             log_fn(" | ".join(items))
             losses = []
+        if not event.gradients_finite:
+            logger.info(f"Step: {event.step:>6} | Non-finite gradients, "
+                        f"loss scale (log2): {event.loss_scale_log2}")
         yield event
 
 
@@ -123,8 +126,6 @@ def atomic_open(path: Path, mode: str = "w") -> Generator[io.IOBase, None, None]
         yield f  # type: ignore
         f.close()
         os.replace(f.name, path)
-    except:
-        raise
     finally:
         if os.path.exists(f.name):
             os.remove(f.name)
@@ -205,7 +206,7 @@ def log_to_wandb(
                 yaml.dump(dict(id=run.id, project=run.project, group=run.group), f)
         elif isinstance(event, TrainStep):
             data: Dict[str, Any] = dict(loss=event.loss)
-            if event.gradients is not None:
+            if event.gradients is not None and event.gradients_finite:
                 tuples = _to_histograms(event.gradients, "/")
                 data["gradients"] = dict(tuples)
             if event.params is not None:
