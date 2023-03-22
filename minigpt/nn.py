@@ -11,7 +11,7 @@ from einops import rearrange, repeat
 
 from .common import Config, get_logger
 
-_DEFAULT_W_INIT = hk.initializers.VarianceScaling(0.01)
+_SMALL_INIT = hk.initializers.VarianceScaling(0.01)
 
 logger = get_logger()
 
@@ -91,7 +91,7 @@ class MultiHeadAttention(hk.Module):
         q_proj = projection(K * H, name="q_proj")
         k_proj = projection(K * H, name="k_proj")
         v_proj = projection(K * H, name="v_proj")
-        o_proj = projection(D, name="o_proj")
+        o_proj = projection(D, name="o_proj", w_init=_SMALL_INIT)
         # Q, K, V
         p = int(K * self.pos_emb_portion)
         q: Array = q_proj(x) / K**0.5  # B L H K
@@ -136,7 +136,7 @@ class FeedForward(hk.Module):
         # Projections
         projection = partial(hk.Linear, with_bias=False)
         in_proj = projection(self.hidden_dim, name="in_proj")
-        out_proj = projection(model_dim, name="out_proj")
+        out_proj = projection(model_dim, name="out_proj", w_init=_SMALL_INIT)
         # Feed-forward
         h = hk.remat(jax.nn.gelu)(in_proj(x))  # B L H
         y = out_proj(h)  # B L M
@@ -229,7 +229,7 @@ class Model(hk.Module):
         embedding = hk.Embed(
             self.vocabulary_size,
             self.embedding_dim,
-            w_init=_DEFAULT_W_INIT,
+            w_init=_SMALL_INIT,
             name="embedding",
         )
         embedding_proj = (
@@ -255,7 +255,7 @@ class Model(hk.Module):
         out_proj = hk.Linear(
             self.embedding_dim,
             with_bias=False,
-            w_init=_DEFAULT_W_INIT,
+            w_init=_SMALL_INIT,
             name="out_proj",
         )
         # Execution
