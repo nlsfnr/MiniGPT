@@ -10,7 +10,7 @@ data:
   length: 1024
   min_length: 768
   pad_token_id: 0
-  batch_size: 32
+  batch_size: 8
   shuffle_buffer_size: 100_000
 
 model:
@@ -24,7 +24,7 @@ model:
   dropout: 0.0
 
 optimizer:
-  gradient_accumulation_steps: [[0, 1], [10_000, 8], [25_000, 64]]
+  gradient_accumulation_steps: [[0, 4], [10_000, 32], [25_000, 256]]
   weight_decay: 0.01
   lr_min: 0.00006
   lr_max: 0.0006

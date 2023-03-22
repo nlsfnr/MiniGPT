@@ -103,15 +103,11 @@ class MultiHeadAttention(hk.Module):
         v: Array = v_proj(x)  # B L H V
         v = rearrange(v, "b l (h v) -> b h l v", h=H)
         # Attention weights
-
-        def _logits_to_weights(l: Array) -> Array:
-            _apply_mask = lambda l_, m_: (l_ if m_ is None else jnp.where(m_, l_, -1e8))
+        l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
+        _apply_mask = lambda l_, m_: (l_ if m_ is None else jnp.where(m_, l_, -jnp.inf))
+        with jax.debug_infs(False):
             l = hk.remat(_apply_mask)(l, mask)
             a = jax.nn.softmax(l)  # B H L L
-            return a
-
-        l: Array = jnp.einsum("b h i k, b h j k -> b h i j", q, k)  # B H L L
-        a = full_precision(_logits_to_weights)(l)
         # Attention output
         y: Array = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)

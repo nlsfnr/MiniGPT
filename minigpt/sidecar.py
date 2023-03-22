@@ -43,8 +43,10 @@ def log_losses(
             log_fn(" | ".join(items))
             losses = []
         if not event.gradients_finite:
-            logger.info(f"Step: {event.step:>6} | Non-finite gradients, "
-                        f"loss scale (log2): {event.loss_scale_log2}")
+            logger.info(
+                f"Step: {event.step:>6} | Non-finite gradients, "
+                f"loss scale (log2): {event.loss_scale_log2}"
+            )
         yield event
 
 
