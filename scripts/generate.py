@@ -41,7 +41,7 @@ def cli_generate(
     top_p: float,
     seed: int,
 ) -> None:
-    cp = minigpt.load_from_directory(path=load_from)
+    cp = minigpt.load_from_directory_for_inference(path=load_from)
     config = cp.config
     params = cp.params
     it = minigpt.generate(

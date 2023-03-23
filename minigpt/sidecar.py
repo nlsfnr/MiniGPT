@@ -198,13 +198,31 @@ def save_to_directory(
 
 
 @dataclass
-class LoadResult:
+class LoadResultForInference:
     config: Config
+    params: ArrayTree
+
+
+@dataclass
+class LoadResult(LoadResultForInference):
     step: int
     seed: int
     rng_key: PRNGKey
-    params: ArrayTree
     opt_state: optax.MultiStepsState
+
+
+def load_from_directory_for_inference(
+    *,
+    path: Path,
+) -> LoadResultForInference:
+    config = Config.from_yaml(path / "config.yaml")
+    with open(path / "params.pkl", "rb") as f:
+        params = pickle.load(f)
+        assert isinstance(params, dict)
+    return LoadResultForInference(
+        config=config,
+        params=params,
+    )
 
 
 def load_from_directory(
