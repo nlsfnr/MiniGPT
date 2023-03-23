@@ -377,10 +377,15 @@ def _broadcast_to_devices(obj: T) -> T:
     device_count = jax.device_count()
 
     def fn(x: Array) -> Array:
-        return jnp.broadcast_to(x, (device_count, *x.shape)) if isinstance(x, Array) else x
+        x = jax.device_put(x, jax.devices("cpu")[0])
+        x = jnp.broadcast_to(x, (device_count, *x.shape)) if isinstance(x, Array) else x
+        return jax.pmap(lambda x: x, axis_name="batch")(x)
+
     return jax.tree_util.tree_map(fn, obj)
 
 
 def _get_from_first_device(obj: T) -> T:
-    fn = lambda x: x[0] if isinstance(x, Array) else x
+    cpu = jax.devices("cpu")[0]
+    jax.device_put(obj, cpu)
+    fn = lambda x: jax.device_put(x[0], cpu) if isinstance(x, Array) else x
     return jax.tree_util.tree_map(fn, obj)

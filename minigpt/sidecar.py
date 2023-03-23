@@ -100,9 +100,11 @@ def log_time_per_step(
             yield event
             continue
         timestamps.append(event.timestamp)
-        if (event.has_updated
-            and event.step % frequency == 0 
-            and len(timestamps) >= max(percentiles)):
+        if (
+            event.has_updated
+            and event.step % frequency == 0
+            and len(timestamps) >= max(percentiles)
+        ):
             deltas = [b - a for a, b in zip(timestamps[:-1], timestamps[1:])]
             deltas_seconds = [delta.total_seconds() for delta in deltas]
             points = statistics.quantiles(deltas_seconds, n=101, method="inclusive")
