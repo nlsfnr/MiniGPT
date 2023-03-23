@@ -63,6 +63,8 @@ def cli(
               help="Data buffer size. Default 10.")
 @click.option("--event-buffer", "-eb", type=int, default=10,
               help="Event buffer size. Default 10.")
+@click.option("--detect-anomalies", "-da", is_flag=True,
+              help="Detect anomalies.")
 # fmt: on
 def train_new(
     config_path: Optional[Path],
@@ -82,6 +84,7 @@ def train_new(
     wandb_tags: Tuple[str, ...],
     data_buffer: int,
     event_buffer: int,
+    detect_anomalies: bool,
 ) -> None:
     rng_key: Optional[PRNGKey]
     params: Optional[ArrayTree]
@@ -159,7 +162,8 @@ def train_new(
                 if run is not None
                 else events
             )
-            events = minigpt.detect_anomalies(events=events)
+            if detect_anomalies:
+                events = minigpt.detect_anomalies(events=events)
             events = minigpt.save_to_directory(events=events)
             for _ in events:
                 pass
