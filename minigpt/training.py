@@ -28,11 +28,12 @@ T = TypeVar("T")
 @dataclass
 class TrainStep:
     step: int
+    has_updated: bool
     loss: float
     gradients_finite: bool
     loss_scale_log2: float
-    gradients: Optional[ArrayTree] = None
-    params: Optional[ArrayTree] = None
+    gradients: Optional[ArrayTree]
+    params: Optional[ArrayTree]
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -164,6 +165,7 @@ def train(
             loss,
             gradients,
             gradients_finite,
+            has_updated,
         ) = rv
         log_params = (
             log_params_frequency is not None and step % log_params_frequency == 0
@@ -171,26 +173,30 @@ def train(
         gffd = _get_from_first_device
         yield TrainStep(
             step=step,
+            has_updated=bool(gffd(has_updated)),
             loss=float(jnp.mean(loss)),
             gradients=to_cpu(gffd(gradients)) if gradients is not None else None,
             params=to_cpu(gffd(params)) if log_params else None,
             gradients_finite=bool(gffd(gradients_finite)),
             loss_scale_log2=round(float(jnp.log2(gffd(loss_scale.loss_scale)))),
         )
+        if not has_updated.all():
+            continue
+        step += 1
         if save_directory is not None:
             assert save_frequency is not None
-            if step % save_frequency == 0:
-                yield Save(
-                    path=save_directory,
-                    step=step,
-                    config=config,
-                    params=to_cpu(gffd(params)),
-                    opt_state=to_cpu(gffd(opt_state)),
-                    loss_scale=to_cpu(gffd(loss_scale)),
-                    rng_key=to_cpu(rng_key),
-                    seed=seed,
-                )
-        step += 1
+            if step % save_frequency != 0:
+                continue
+            yield Save(
+                path=save_directory,
+                step=step,
+                config=config,
+                params=to_cpu(gffd(params)),
+                opt_state=to_cpu(gffd(opt_state)),
+                loss_scale=to_cpu(gffd(loss_scale)),
+                rng_key=to_cpu(rng_key),
+                seed=seed,
+            )
 
 
 class _TrainStepRV(NamedTuple):
@@ -200,6 +206,7 @@ class _TrainStepRV(NamedTuple):
     loss: Array
     gradients: Optional[ArrayTree]
     gradients_finite: Array
+    has_updated: Array
 
 
 def _train_step(
@@ -226,8 +233,8 @@ def _train_step(
         with_gradients: Whether to return gradients.
 
     Returns:
-        A tuple of the new parameters, optimizer state, loss scale, loss, gradients, and whether
-        gradients are finite.
+        A tuple of the new parameters, optimizer state, loss scale, loss, gradients, whether
+        gradients are finite and whether the parameters have been updated.
     """
     loss_fn = hk.transform(partial(_loss_fn, config=config)).apply
     grad_fn = jax.grad(loss_fn, has_aux=True)
@@ -251,6 +258,7 @@ def _train_step(
         loss=loss_aux.loss,
         gradients=gradients if with_gradients else None,
         gradients_finite=gradients_finite,
+        has_updated=optimizer.has_updated(opt_state),
     )
 
 
@@ -352,16 +360,16 @@ def _get_loss_scale(
 def _set_amp_policy(config: Config) -> jmp.Policy:
     full = jnp.dtype(jnp.float32)
     half = jnp.dtype(jnp.float16 if config.mixed_precision.enable else jnp.float32)
-    half_policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=half)
-    full_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=full)
-    hk.mixed_precision.set_policy(nn.Model, half_policy)
-    hk.mixed_precision.set_policy(nn.Block, half_policy)
-    hk.mixed_precision.set_policy(nn.MultiHeadAttention, half_policy)
-    hk.mixed_precision.set_policy(nn.FeedForward, half_policy)
-    hk.mixed_precision.set_policy(hk.Embed, half_policy)
-    hk.mixed_precision.set_policy(hk.Linear, half_policy)
-    hk.mixed_precision.set_policy(hk.LayerNorm, full_policy)
-    return half_policy
+    policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=half)
+    hk.mixed_precision.set_policy(nn.Model, policy)
+    hk.mixed_precision.set_policy(nn.Block, policy)
+    hk.mixed_precision.set_policy(nn.MultiHeadAttention, policy)
+    hk.mixed_precision.set_policy(nn.FeedForward, policy)
+    hk.mixed_precision.set_policy(hk.Embed, policy)
+    hk.mixed_precision.set_policy(hk.Linear, policy)
+    ln_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=half)
+    hk.mixed_precision.set_policy(hk.LayerNorm, ln_policy)
+    return policy
 
 
 def _broadcast_to_devices(obj: T) -> T:

@@ -147,12 +147,13 @@ def train_new(
             log_params_frequency=log_params_frequency,
         )
         with minigpt.BufferedIterator(train_fn, event_buffer) as events:
-            events = minigpt.log_losses(events=events, frequency=log_frequency)
             events = minigpt.log_time_per_step(
                 events=events,
                 frequency=log_time_per_step_frequency,
                 percentiles=log_time_per_step_percentiles,
             )
+            events = minigpt.accumulate_gac_steps(events=events)
+            events = minigpt.log_losses(events=events, frequency=log_frequency)
             events = (
                 minigpt.log_to_wandb(events=events, run=run)
                 if run is not None

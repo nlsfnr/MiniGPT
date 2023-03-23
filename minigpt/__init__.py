@@ -3,6 +3,7 @@ from .data import batches_from_config
 from .inference import generate, perplexity
 from .nn import Model
 from .sidecar import (
+    accumulate_gac_steps,
     detect_anomalies,
     load_from_directory,
     load_wandb_run,
@@ -21,6 +22,7 @@ __all__ = (
     "Event",
     "Model",
     "TrainStep",
+    "accumulate_gac_steps",
     "batches_from_config",
     "detect_anomalies",
     "generate",

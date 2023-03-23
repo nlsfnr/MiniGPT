@@ -22,6 +22,40 @@ from .training import Event, Save, TrainStep
 logger = get_logger()
 
 
+def accumulate_gac_steps(
+    *,
+    events: Iterable[Event],
+) -> Iterable[Event]:
+    losses = []
+    gradients = None
+    params = None
+    gradients_finite = True
+    for event in events:
+        if not isinstance(event, TrainStep):
+            yield event
+            continue
+        losses.append(event.loss)  # Take the mean of the losses.
+        gradients_finite = gradients_finite and event.gradients_finite  # All finite.
+        gradients = event.gradients or gradients  # Only keep the last gradients.
+        params = event.params or params  # Only keep the last params.
+        if not event.has_updated:
+            continue
+        yield TrainStep(
+            step=event.step,
+            has_updated=True,
+            loss=statistics.mean(losses),
+            gradients_finite=gradients_finite,
+            loss_scale_log2=event.loss_scale_log2,
+            gradients=gradients,
+            params=params,
+            timestamp=event.timestamp,
+        )
+        losses = []
+        gradients = None
+        params = None
+        gradients_finite = True
+
+
 def log_losses(
     *,
     events: Iterable[Event],
@@ -34,8 +68,8 @@ def log_losses(
             yield event
             continue
         losses.append(event.loss)
-        if event.step % frequency == 0 and len(losses) >= 2:
-            mean, std = statistics.mean(losses), statistics.stdev(losses)
+        if event.step % frequency == 0 and losses:
+            mean, std = statistics.mean(losses), statistics.pstdev(losses)
             items = (
                 f"Step: {event.step:>6}",
                 f"Loss: {mean:0.6f} ± {std:0.6f}",
@@ -66,7 +100,9 @@ def log_time_per_step(
             yield event
             continue
         timestamps.append(event.timestamp)
-        if event.step % frequency == 0 and len(timestamps) >= max(percentiles):
+        if (event.has_updated
+            and event.step % frequency == 0 
+            and len(timestamps) >= max(percentiles)):
             deltas = [b - a for a, b in zip(timestamps[:-1], timestamps[1:])]
             deltas_seconds = [delta.total_seconds() for delta in deltas]
             points = statistics.quantiles(deltas_seconds, n=101, method="inclusive")

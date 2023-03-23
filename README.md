@@ -15,6 +15,22 @@ If you want to see some code, have a look at
   W&B logging, auto-saving etc.
 - [`./scripts/*.py`](/scripts/) - Scripts exposing CLIs to interact with MiniGPT.
 
+## Details and results
+
+MiniGPT is the result of combining some findings and ideas of the [*Cramming*
+paper by Geiping et al.](https://arxiv.org/abs/2212.14034) and [LLaMA by
+Touvron et al.](https://arxiv.org/abs/2302.13971).
+
+Below are some stats from a training run on an A100 with the
+`./configs/300M.yaml` config. The trained model has 300M parameters and a
+context length of 1024 tokens. The device batchsize is 8 with a global batch
+size that starts at 32 and reaches 2,048 after 25,000 steps using gradient
+accumulation.
+
+- MiniGPT maintains a *very* constant 97% GPU utilisation.
+- It processes about 39,000 tokens/second (1024 tokens/sample * 8
+  samples/device-batch * 4.76 device-batches/second)
+
 ## Using MiniGPT
 
 Either run `pip install -r requirements.txt` (note that a prior [installation

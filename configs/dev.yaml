@@ -11,20 +11,20 @@ data:
   min_length: 24
   pad_token_id: 0
   batch_size: 32
-  shuffle_buffer_size: 25_000
+  shuffle_buffer_size: 1_000
 
 model:
-  num_layers: 8
+  num_layers: 2
   vocabulary_size: 32_768
   embedding_dim: 128
-  model_dim: 512
-  num_heads: 8
+  model_dim: 256
+  num_heads: 4
   pos_emb_portion: 0.5
-  hidden_dim: 2_048
+  hidden_dim: 1_024
   dropout: 0.0
 
 optimizer:
-  gradient_accumulation_steps: [[0, 1], [5_000, 2], [10_000, 4], [25_000, 8], [50_000, 32]]
+  gradient_accumulation_steps: [[0, 1], [10, 2], [100, 4], [200, 8], [300, 32]]
   weight_decay: 0.01
   lr_min: 0.00006
   lr_max: 0.0006
@@ -32,7 +32,7 @@ optimizer:
   lr_warmup_steps: 100
   gradient_clip_norm: 1.0
   adam_b1: 0.9
-  adam_b2: 0.995
+  adam_b2: 0.999
 
 mixed_precision:
   enable: true
