@@ -125,6 +125,7 @@ def train(
     assert step is not None
     assert batches is not None
     device_count = jax.device_count()
+    logger.info(f"Running on {device_count} devices.")
     params = _broadcast_to_devices(params)
     opt_state = _broadcast_to_devices(opt_state)
     loss_scale = _broadcast_to_devices(loss_scale)
@@ -374,9 +375,9 @@ def _set_amp_policy(config: Config) -> jmp.Policy:
 
 def _broadcast_to_devices(obj: T) -> T:
     device_count = jax.device_count()
-    fn = lambda x: (
-        jnp.broadcast_to(x, (device_count, *x.shape)) if isinstance(x, Array) else x
-    )
+
+    def fn(x: Array) -> Array:
+        return jnp.broadcast_to(x, (device_count, *x.shape)) if isinstance(x, Array) else x
     return jax.tree_util.tree_map(fn, obj)
 
 
