@@ -17,7 +17,7 @@ from wandb.sdk.wandb_run import Run as WandbRun
 import wandb
 
 from .common import Config, get_logger
-from .training import Event, Save, TrainStep
+from .training import Event, Save, TrainStep, EndOfTraining
 
 logger = get_logger()
 
@@ -31,6 +31,9 @@ def accumulate_gac_steps(
     params = None
     gradients_finite = True
     for event in events:
+        if isinstance(event, EndOfTraining):
+            yield event
+            return
         if not isinstance(event, TrainStep):
             yield event
             continue
@@ -64,6 +67,9 @@ def log_losses(
 ) -> Iterable[Event]:
     losses = []
     for event in events:
+        if isinstance(event, EndOfTraining):
+            yield event
+            return
         if not isinstance(event, TrainStep):
             yield event
             continue
@@ -96,6 +102,9 @@ def log_time_per_step(
     percentiles = tuple(percentiles)
     timestamps = []
     for event in events:
+        if isinstance(event, EndOfTraining):
+            yield event
+            return
         if not isinstance(event, TrainStep):
             yield event
             continue
@@ -124,6 +133,9 @@ def detect_anomalies(
     events: Iterable[Event],
 ) -> Iterable[Event]:
     for event in events:
+        if isinstance(event, EndOfTraining):
+            yield event
+            return
         if not isinstance(event, TrainStep):
             yield event
             continue
@@ -176,6 +188,9 @@ def save_to_directory(
     events: Iterable[Event],
 ) -> Iterable[Event]:
     for event in events:
+        if isinstance(event, EndOfTraining):
+            yield event
+            return
         if not isinstance(event, Save):
             yield event
             continue
@@ -258,6 +273,9 @@ def log_to_wandb(
     run: WandbRun,
 ) -> Iterable[Event]:
     for event in events:
+        if isinstance(event, EndOfTraining):
+            yield event
+            return
         if isinstance(event, Save):
             event.path.mkdir(parents=True, exist_ok=True)
             with atomic_open(event.path / "wandb-run.yaml", "w") as f:

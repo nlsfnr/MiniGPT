@@ -1,22 +1,22 @@
 from __future__ import annotations
 
+import queue
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
-from itertools import islice
 from pathlib import Path
-from typing import Iterable, NamedTuple, Optional, Tuple, TypeVar, Union
+from typing import NamedTuple, Optional, Tuple, TypeVar, Union
 
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import jmp
-import numpy as np
 import optax
 from chex import Array, ArrayTree, PRNGKey
 from einops import rearrange
 
-from . import data, nn
+from . import nn
 from .common import Config, get_logger
 
 logger = get_logger()
@@ -49,140 +49,246 @@ class Save:
     seed: int
 
 
-Event = Union[TrainStep, Save]
+class EndOfTraining:
+    pass
 
 
-def train(
-    *,
-    config: Config,
-    seed: int,
-    rng_key: Optional[PRNGKey] = None,
-    params: Optional[ArrayTree] = None,
-    opt_state: Optional[optax.MultiStepsState] = None,
-    loss_scale: Optional[jmp.LossScale] = None,
-    step: Optional[int] = None,
-    batches: Optional[Union[Iterable[Array], Iterable[np.ndarray]]] = None,
-    save_frequency: Optional[int] = None,
-    save_directory: Optional[Path] = None,
-    log_gradients_frequency: Optional[int] = None,
-    log_params_frequency: Optional[int] = None,
-    log_param_size_on_init: bool = True,
-) -> Iterable[Event]:
-    """The training loop.
+Event = Union[TrainStep, Save, EndOfTraining]
 
-    Args:
-        config: Configuration.
-        seed: Seed to use to initiate the training loop.
-        rng_key: Current random number generator key to use, corresponding to the current step.
-        params: Parameters to use.
-        opt_state: Optimizer state to use.
-        loss_scale: Loss scale to use.
-        step: The current step of the training loop.
-        batches: Iterable of batches to use.
-        save_frequency: Frequency at which to send a `Save` event.
-        save_directory: Directory to specify for the `Save` event.
-        log_gradients_frequency: Frequency at which to send a `TrainStep` event with gradients.
-        log_params_frequency: Frequency at which to send a `TrainStep` event with parameters.
-        log_param_size_on_init: Whether to log the parameter size on initialization.
 
-    Yields:
-        Training events. Can be either a `TrainStep` or a `Save`.
-    """
-    if rng_key is None:
-        rng_key = jax.random.PRNGKey(seed)
-    if params is None:
-        params = nn.Model.get_params(config, seed + 1, log_size=log_param_size_on_init)
-    if opt_state is None:
-        opt_state = _get_optimizer(config).init(params)
-    if step is None:
-        step = 0
-    if loss_scale is None:
-        loss_scale = _get_loss_scale(config, step)
-    if batches is None:
-        batches = islice(
-            data.batches_from_config(config, seed + 2, extra_length=1), step, None
+class StopTraining(Exception):
+    pass
+
+
+class Trainer(threading.Thread):
+    def __init__(
+        self,
+        *,
+        batch_queue: queue.Queue,
+        event_queue: queue.Queue,
+        config: Config,
+        seed: int,
+        termination_event: Optional[threading.Event] = None,
+        timeout: float = 0.1,
+        rng_key: Optional[PRNGKey] = None,
+        params: Optional[ArrayTree] = None,
+        opt_state: Optional[optax.MultiStepsState] = None,
+        loss_scale: Optional[jmp.LossScale] = None,
+        step: Optional[int] = None,
+        save_frequency: Optional[int] = None,
+        save_directory: Optional[Path] = None,
+        log_gradients_frequency: Optional[int] = None,
+        log_params_frequency: Optional[int] = None,
+        log_param_size_on_init: bool = True,
+    ) -> None:
+        super().__init__()
+        self.batch_queue = batch_queue
+        self.event_queue = event_queue
+        self.config = config
+        self.seed = seed
+        self.termination_event = termination_event or threading.Event()
+        self.timeout = timeout
+        self.rng_key = rng_key or jax.random.PRNGKey(seed)
+        self.params = params or nn.Model.get_params(config, seed + 1)
+        self.opt_state = opt_state or _get_optimizer(config).init(self.params)
+        self.step = step or 0
+        self.loss_scale = loss_scale or _get_loss_scale(config, self.step)
+        self.save_frequency = save_frequency
+        self.save_directory = save_directory
+        self.log_gradients_frequency = log_gradients_frequency
+        self.log_params_frequency = log_params_frequency
+        self.log_param_size_on_init = log_param_size_on_init
+        self._exception: Optional[Exception] = None
+        self._policy = _set_amp_policy(self.config)
+        # Two training functions, one which returns gradients and one which does not.
+        self._train_step_with_gradients = jax.pmap(
+            partial(
+                _train_step, config=self.config, axis_name="device", with_gradients=True
+            ),
+            axis_name="device",
         )
-    batches = map(partial(jnp.asarray, dtype=jnp.int32), batches)
-    policy = _set_amp_policy(config)
-    assert params is not None
-    assert opt_state is not None
-    assert rng_key is not None
-    assert step is not None
-    assert batches is not None
-    device_count = jax.device_count()
-    logger.info(f"Running on {device_count} devices.")
-    params = _broadcast_to_devices(params)
-    opt_state = _broadcast_to_devices(opt_state)
-    loss_scale = _broadcast_to_devices(loss_scale)
+        self._train_step_without_gradients = jax.pmap(
+            partial(
+                _train_step,
+                config=self.config,
+                axis_name="device",
+                with_gradients=False,
+            ),
+            axis_name="device",
+        )
 
-    train_step_with_gradients = jax.pmap(
-        partial(_train_step, config=config, axis_name="device", with_gradients=True),
-        axis_name="device",
-    )
-    train_step_without_gradients = jax.pmap(
-        partial(_train_step, config=config, axis_name="device", with_gradients=False),
-        axis_name="device",
-    )
+    def run(self) -> None:
+        logger.info(f"Starting training loop at step {self.step}.")
+        try:
+            self.loop()
+        except StopTraining:
+            logger.info(f"Training loop terminated at step {self.step}.")
+        except Exception as e:
+            logger.exception(f"Training loop failed at step {self.step}.")
+            self._exception = e
+            raise
 
-    for batch in batches:
-        rng_key, subkey = jax.random.split(rng_key)
-        subkeys = jax.random.split(subkey, num=device_count)
-        batch = policy.cast_to_compute(batch)
+    def join(self, timeout: Optional[float] = None) -> None:
+        super().join(timeout)
+        if self._exception is not None:
+            raise self._exception
+
+    def terminate(self, timeout: Optional[float] = None) -> Trainer:
+        logger.info("Terminating training thread.")
+        self.termination_event.set()
+        self.join(timeout)
+        return self
+
+    def save_and_terminate(self, timeout: Optional[float] = None) -> Trainer:
+        self._save()
+        return self.terminate(timeout)
+
+    def emit_end_of_training_event(self) -> Trainer:
+        if self.is_alive():
+            raise RuntimeError("Cannot emit EndOfTraining event while running."
+                               " Call terminate() or save_and_terminate() first.")
+        self.event_queue.put(EndOfTraining())
+        return self
+
+    def __enter__(self) -> Trainer:
+        self.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self.is_alive():
+            self.terminate()
+        self.join()
+
+    def loop(self) -> Trainer:
+        self.params = _broadcast_to_devices(self.params)
+        self.opt_state = _broadcast_to_devices(self.opt_state)
+        self.loss_scale = _broadcast_to_devices(self.loss_scale)
+        while True:
+            with_gradients = (
+                self.log_gradients_frequency is not None
+                and self.step % self.log_gradients_frequency == 0
+            )
+            with_params = (
+                self.log_params_frequency is not None
+                and self.step % self.log_params_frequency == 0
+            )
+            self.train_step(self._fetch_batch(), with_gradients, with_params)
+
+    def train_step(
+        self,
+        batch: Array,
+        with_gradients: bool,
+        with_params: bool,
+    ) -> Trainer:
+        """Performs one training step. Notably, this does not mean that the parameters will be
+        updated. This is because we use a multi-step optimizer, which means that we accumulate
+        gradients over multiple steps before updating the parameters."""
+        # Split the batch across devices.
+        device_count = jax.device_count()
+        batch = self._policy.cast_to_compute(batch)
         batch = rearrange(batch, "(d b) ... -> d b ...", d=device_count)
-        with_gradients = (
-            log_gradients_frequency is not None and step % log_gradients_frequency == 0
-        )
+        # Select the training function, depending on whether we want gradients or not.
         train_step = (
-            train_step_with_gradients
+            self._train_step_with_gradients
             if with_gradients
-            else train_step_without_gradients
+            else self._train_step_without_gradients
         )
-        rv: _TrainStepRV = train_step(
+        # Get a new RNG key for each device
+        self.rng_key, subkey = jax.random.split(self.rng_key)
+        subkeys = jax.random.split(subkey, device_count)
+        # Run the training step.
+        retval = train_step(
             indices=batch,
-            params=params,
-            opt_state=opt_state,
-            loss_scale=loss_scale,
+            params=self.params,
+            opt_state=self.opt_state,
+            loss_scale=self.loss_scale,
             rng_key=subkeys,
         )
         (
-            params,
-            opt_state,
-            loss_scale,
+            self.params,
+            self.opt_state,
+            self.loss_scale,
             loss,
             gradients,
             gradients_finite,
             has_updated,
-        ) = rv
-        log_params = (
-            log_params_frequency is not None and step % log_params_frequency == 0
-        )
+        ) = retval
+        # Emit the event.
         gffd = _get_from_first_device
-        yield TrainStep(
-            step=step,
-            has_updated=bool(gffd(has_updated)),
-            loss=float(jnp.mean(loss)),
-            gradients=gffd(gradients) if gradients is not None else None,
-            params=gffd(params) if log_params else None,
-            gradients_finite=bool(gffd(gradients_finite)),
-            loss_scale_log2=round(float(jnp.log2(gffd(loss_scale.loss_scale)))),
-        )
-        if not has_updated.all():
-            continue
-        step += 1
-        if save_directory is not None:
-            assert save_frequency is not None
-            if step % save_frequency != 0:
-                continue
-            yield Save(
-                path=save_directory,
-                step=step,
-                config=config,
-                params=gffd(params),
-                opt_state=gffd(opt_state),
-                loss_scale=gffd(loss_scale),
-                rng_key=rng_key,
-                seed=seed,
+        self._emit_event(
+            TrainStep(
+                step=self.step,
+                has_updated=bool(gffd(has_updated)),
+                loss=float(jnp.mean(loss)),
+                gradients=gffd(gradients),
+                params=gffd(self.params) if with_params else None,
+                gradients_finite=bool(gffd(gradients_finite)),
+                loss_scale_log2=round(float(gffd(jnp.log2(self.loss_scale.loss_scale)))),
             )
+        )
+        # If this is a gradient-accumulation step, don't update the step count.
+        if not has_updated.all():
+            return self
+        # Update the step count.
+        self.step += 1
+        # Save the model.
+        if (
+            self.save_frequency is not None
+            and self.save_directory is not None
+            and self.step % self.save_frequency == 0
+        ):
+            self._save()
+        return self
+
+    def _save(self) -> Trainer:
+        """Emits a save event."""
+        if self.save_directory is None:
+            return self
+        gffd = _get_from_first_device
+        self._emit_event(
+            Save(
+                path=self.save_directory,
+                step=self.step,
+                config=self.config,
+                params=gffd(self.params),
+                loss_scale=gffd(self.loss_scale),
+                opt_state=gffd(self.opt_state),
+                rng_key=self.rng_key,
+                seed=self.seed,
+            )
+        )
+        return self
+
+    def _emit_event(
+        self,
+        event: Event,
+    ) -> Trainer:
+        """Emits an event."""
+        while True:
+            if self.termination_event.is_set():
+                raise StopTraining("Termination event set when emitting event.")
+            try:
+                self.event_queue.put(event, timeout=self.timeout)
+                break
+            except queue.Full:
+                pass
+        return self
+
+    def _fetch_batch(
+        self,
+    ) -> Array:
+        """Fetches a batch from the batch queue."""
+        cpu = jax.devices("cpu")[0]
+        while True:
+            if self.termination_event.is_set():
+                raise StopTraining("Termination event set when fetching batch.")
+            try:
+                batch = self.batch_queue.get(timeout=self.timeout)
+                batch = jnp.asarray(batch, dtype=jnp.int32)
+                batch = jax.device_put(batch, device=cpu)
+                return batch
+            except queue.Empty:
+                pass
 
 
 class _TrainStepRV(NamedTuple):

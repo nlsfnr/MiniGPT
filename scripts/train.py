@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
+import queue
 import sys
-from functools import partial
+import threading
 from itertools import islice
 from pathlib import Path
 from pprint import pformat
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 import click
+import numpy as np
 import optax
 from chex import ArrayTree, PRNGKey
 
@@ -131,42 +133,87 @@ def train_new(
         )
     else:
         raise ValueError("Must specify either config-path or load-from")
-    batches_fn = lambda: islice(
-        minigpt.batches_from_config(config, seed + 1, extra_length=1), step, None
+
+    batch_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=data_buffer)
+    trainer_event_queue: queue.Queue[minigpt.Event] = queue.Queue(maxsize=event_buffer)
+    sidecar_event_queue: queue.Queue[minigpt.Event] = queue.Queue()
+    trainer_termination_event = threading.Event()
+    batch_termination_event = threading.Event()
+    sidecar_termination_event = threading.Event()
+
+    def batches_fn() -> Iterator[np.ndarray]:
+        assert isinstance(seed, int)
+        batches = minigpt.batches_from_config(config, seed, extra_length=1)
+        # TODO: Make this compatible with gradient accumulation
+        return islice(batches, step, None)
+
+    batch_queue_thread = minigpt.IteratorAsQueue(
+        iterator_fn=batches_fn,
+        queue=batch_queue,
+        termination_event=batch_termination_event,
     )
-    with minigpt.BufferedIterator(batches_fn, data_buffer) as batches:
-        train_fn = partial(
-            minigpt.train,
-            batches=batches,
-            config=config,
-            seed=seed,
-            rng_key=rng_key,
-            params=params,
-            opt_state=opt_state,
-            step=step,
-            save_frequency=save_frequency,
-            save_directory=save_directory,
-            log_gradients_frequency=log_gradients_frequency,
-            log_params_frequency=log_params_frequency,
+
+    def sidecar_fn() -> Iterator[minigpt.Event]:
+        events = minigpt.queue_as_iterator(trainer_event_queue)
+        events = minigpt.log_time_per_step(
+            events=events,
+            frequency=log_time_per_step_frequency,
+            percentiles=log_time_per_step_percentiles,
         )
-        with minigpt.BufferedIterator(train_fn, event_buffer) as events:
-            events = minigpt.log_time_per_step(
-                events=events,
-                frequency=log_time_per_step_frequency,
-                percentiles=log_time_per_step_percentiles,
-            )
-            events = minigpt.accumulate_gac_steps(events=events)
-            events = minigpt.log_losses(events=events, frequency=log_frequency)
-            events = (
-                minigpt.log_to_wandb(events=events, run=run)
-                if run is not None
-                else events
-            )
-            if detect_anomalies:
-                events = minigpt.detect_anomalies(events=events)
-            events = minigpt.save_to_directory(events=events)
-            for _ in events:
-                pass
+        events = minigpt.accumulate_gac_steps(events=events)
+        events = minigpt.log_losses(events=events, frequency=log_frequency)
+        events = (
+            minigpt.log_to_wandb(events=events, run=run) if run is not None else events
+        )
+        if detect_anomalies:
+            events = minigpt.detect_anomalies(events=events)
+        events = minigpt.save_to_directory(events=events)
+        return iter(events)
+
+    sidecar_thread = minigpt.IteratorAsQueue(
+        iterator_fn=sidecar_fn,
+        queue=sidecar_event_queue,
+        termination_event=sidecar_termination_event,
+    )
+
+    trainer_thread = minigpt.Trainer(
+        batch_queue=batch_queue,
+        event_queue=trainer_event_queue,
+        config=config,
+        seed=seed,
+        termination_event=trainer_termination_event,
+        rng_key=rng_key,
+        params=params,
+        opt_state=opt_state,
+        step=step,
+        save_frequency=save_frequency,
+        save_directory=save_directory,
+        log_gradients_frequency=log_gradients_frequency,
+        log_params_frequency=log_params_frequency,
+    )
+
+    with batch_queue_thread, sidecar_thread, trainer_thread:
+        events = minigpt.queue_as_iterator(sidecar_event_queue)
+        try:
+            for event in events:
+                del event
+        except KeyboardInterrupt:
+            try:
+                logger.info("Keyboard interrupt received. Graceful shutdown...")
+                batch_termination_event.set()
+                batch_queue_thread.join()
+                logger.info("Batch queue thread joined.")
+                trainer_thread.save_and_terminate().emit_end_of_training_event()
+                logger.info("Trainer thread joined.")
+                sidecar_thread.join()
+                logger.info("Sidecar thread joined.")
+            except KeyboardInterrupt:
+                logger.info("Keyboard interrupt received again. Hard shutdown...")
+                batch_termination_event.set()
+                trainer_termination_event.set()
+                sidecar_termination_event.set()
+        finally:
+            logger.info("Training ended.")
 
 
 if __name__ == "__main__":

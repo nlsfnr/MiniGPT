@@ -14,15 +14,17 @@ from .sidecar import (
     new_wandb_run,
     save_to_directory,
 )
-from .threading_utils import BufferedIterator
-from .training import Event, TrainStep, train
+from .threading_utils import BufferedIterator, IteratorAsQueue, queue_as_iterator
+from .training import Event, Trainer, TrainStep
 
 __all__ = (
     "BufferedIterator",
     "Config",
     "Event",
+    "IteratorAsQueue",
     "Model",
     "TrainStep",
+    "Trainer",
     "accumulate_gac_steps",
     "batches_from_config",
     "detect_anomalies",
@@ -36,8 +38,8 @@ __all__ = (
     "log_to_wandb",
     "new_wandb_run",
     "perplexity",
+    "queue_as_iterator",
     "save_to_directory",
     "set_debug",
     "setup_logging",
-    "train",
 )

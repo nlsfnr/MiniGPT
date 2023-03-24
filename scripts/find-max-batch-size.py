@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
+import queue
 import sys
 from pathlib import Path
 from typing import Optional
 
 import click
 import jax.numpy as jnp
+from chex import Array
 
 sys.path.append(".")
 
-import minigpt.training as training  # noqa: E402
-from minigpt.common import Config, get_logger, setup_logging  # noqa: E402
+import minigpt  # noqa: E402
 
-logger = get_logger()
+logger = minigpt.get_logger()
 
 
 @click.command()
@@ -31,8 +32,8 @@ def cli(
     high: int,
     iterations: int,
 ) -> None:
-    setup_logging()
-    config = Config.from_yaml(config_path)
+    minigpt.setup_logging()
+    config = minigpt.Config.from_yaml(config_path)
     config.data.length = length or config.data.length
     config.model.model_dim = model_dim or config.model.model_dim
     config.model.embedding_dim = embedding_dim or config.model.embedding_dim
@@ -42,12 +43,21 @@ def cli(
             batches = [
                 jnp.ones((batch_size, config.data.length), dtype=jnp.int32)
             ] * iterations
-            events = training.train(
-                config=config, seed=0, batches=batches, log_param_size_on_init=False
+            batch_queue: queue.Queue[Array] = queue.Queue()
+            for batch in batches:
+                batch_queue.put(batch)
+            event_queue: queue.Queue[minigpt.Event] = queue.Queue()
+            trainer_thread = minigpt.Trainer(
+                event_queue=event_queue,
+                batch_queue=batch_queue,
+                config=config,
+                seed=0,
             )
-            events = filter(lambda e: isinstance(e, training.TrainStep), events)
-            for _ in range(iterations):
-                next(events)
+            events = minigpt.queue_as_iterator(event_queue)
+            events = filter(lambda e: isinstance(e, minigpt.TrainStep), events)
+            with trainer_thread:
+                for _ in range(iterations):
+                    next(events)
 
         try:
             fn()
