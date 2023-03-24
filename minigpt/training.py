@@ -52,21 +52,6 @@ class Save:
 Event = Union[TrainStep, Save]
 
 
-def to_cpu(t: ArrayTreeT) -> ArrayTreeT:
-    """Move a Jax array tree to the CPU.
-
-    Args:
-        t: Array tree to move to the CPU.
-
-    Returns:
-        Array tree on the CPU.
-    """
-    if t is None:
-        return t
-    cpu = jax.devices("cpu")[0]
-    return jax.tree_util.tree_map(lambda x: jax.device_put(x, device=cpu), t)
-
-
 def train(
     *,
     config: Config,
@@ -176,8 +161,8 @@ def train(
             step=step,
             has_updated=bool(gffd(has_updated)),
             loss=float(jnp.mean(loss)),
-            gradients=to_cpu(gffd(gradients)) if gradients is not None else None,
-            params=to_cpu(gffd(params)) if log_params else None,
+            gradients=gffd(gradients) if gradients is not None else None,
+            params=gffd(params) if log_params else None,
             gradients_finite=bool(gffd(gradients_finite)),
             loss_scale_log2=round(float(jnp.log2(gffd(loss_scale.loss_scale)))),
         )
@@ -192,10 +177,10 @@ def train(
                 path=save_directory,
                 step=step,
                 config=config,
-                params=to_cpu(gffd(params)),
-                opt_state=to_cpu(gffd(opt_state)),
-                loss_scale=to_cpu(gffd(loss_scale)),
-                rng_key=to_cpu(rng_key),
+                params=gffd(params),
+                opt_state=gffd(opt_state),
+                loss_scale=gffd(loss_scale),
+                rng_key=rng_key,
                 seed=seed,
             )
 
@@ -374,6 +359,7 @@ def _set_amp_policy(config: Config) -> jmp.Policy:
 
 
 def _broadcast_to_devices(obj: T) -> T:
+    """Broadcasts a tree of arrays to all devices."""
     device_count = jax.device_count()
 
     def fn(x: Array) -> Array:
@@ -385,7 +371,7 @@ def _broadcast_to_devices(obj: T) -> T:
 
 
 def _get_from_first_device(obj: T) -> T:
+    """Gets a tree of arrays from the first device, putting it on the CPU."""
     cpu = jax.devices("cpu")[0]
-    jax.device_put(obj, cpu)
     fn = lambda x: jax.device_put(x[0], cpu) if isinstance(x, Array) else x
     return jax.tree_util.tree_map(fn, obj)
