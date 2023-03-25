@@ -11,13 +11,14 @@ from typing import Any, Callable, Dict, Generator, Iterable, Optional, Tuple
 import numpy as np
 import optax
 import yaml
-from chex import Array, ArrayTree, PRNGKey
+from chex import ArrayTree, PRNGKey
+from jax import Array
 from wandb.sdk.wandb_run import Run as WandbRun
 
 import wandb
 
 from .common import Config, get_logger
-from .training import Event, Save, TrainStep, EndOfTraining
+from .training import EndOfTraining, Event, Save, TrainStep
 
 logger = get_logger()
 

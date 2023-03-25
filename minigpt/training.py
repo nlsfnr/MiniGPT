@@ -13,8 +13,9 @@ import jax
 import jax.numpy as jnp
 import jmp
 import optax
-from chex import Array, ArrayTree, PRNGKey
+from chex import ArrayTree, PRNGKey
 from einops import rearrange
+from jax import Array
 
 from . import nn
 from .common import Config, get_logger
@@ -145,8 +146,10 @@ class Trainer(threading.Thread):
 
     def emit_end_of_training_event(self) -> Trainer:
         if self.is_alive():
-            raise RuntimeError("Cannot emit EndOfTraining event while running."
-                               " Call terminate() or save_and_terminate() first.")
+            raise RuntimeError(
+                "Cannot emit EndOfTraining event while running."
+                " Call terminate() or save_and_terminate() first."
+            )
         self.event_queue.put(EndOfTraining())
         return self
 
@@ -223,7 +226,9 @@ class Trainer(threading.Thread):
                 gradients=gffd(gradients),
                 params=gffd(self.params) if with_params else None,
                 gradients_finite=bool(gffd(gradients_finite)),
-                loss_scale_log2=round(float(gffd(jnp.log2(self.loss_scale.loss_scale)))),
+                loss_scale_log2=round(
+                    float(gffd(jnp.log2(self.loss_scale.loss_scale)))
+                ),
             )
         )
         # If this is a gradient-accumulation step, don't update the step count.

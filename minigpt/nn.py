@@ -6,8 +6,9 @@ from typing import Callable, Optional, Union
 import haiku as hk
 import jax
 import jax.numpy as jnp
-from chex import Array, ArrayTree, PRNGKey
+from chex import ArrayTree, PRNGKey
 from einops import rearrange, repeat
+from jax import Array
 
 from .common import Config, get_logger
 

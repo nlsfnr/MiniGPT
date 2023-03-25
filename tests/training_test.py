@@ -1,7 +1,7 @@
 import queue
 
 import jax.numpy as jnp
-from chex import Array
+from jax import Array
 
 import minigpt
 
