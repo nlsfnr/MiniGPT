@@ -2,15 +2,15 @@ dataset:
   - args: [c4, en]  # 305 GB
     kwargs: {split: train}
     weight: 305  # 1:1
-  - args: [wikitext, wikitext-103-raw-v1]  # 0.5 GB
-    kwargs: {split: train}
-    weight: 3  # 6:1
-  - args: [bookcorpusopen]  # 6.3 GB
-    kwargs: {split: train}
-    weight: 37.8  # 6:1
-  - args: [multi_news]  # 0.7 GB
-    kwargs: {split: train, key: document}
-    weight: 4.2  # 6:1
+      #  - args: [wikitext, wikitext-103-raw-v1]  # 0.5 GB
+      #    kwargs: {split: train}
+      #    weight: 3  # 6:1
+      #  - args: [bookcorpusopen]  # 6.3 GB
+      #    kwargs: {split: train}
+      #    weight: 37.8  # 6:1
+      #  - args: [multi_news]  # 0.7 GB
+      #    kwargs: {split: train, key: document}
+      #    weight: 4.2  # 6:1
 
 tokenizer:
   args: [bert-base-uncased]

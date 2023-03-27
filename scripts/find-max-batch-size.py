@@ -3,7 +3,6 @@ import queue
 import sys
 from pathlib import Path
 from typing import Optional
-import threading
 
 import click
 import jax.numpy as jnp
@@ -42,7 +41,7 @@ def cli(
     def guard(batch_size: int) -> bool:
         def fn() -> None:
             batches = [
-                jnp.ones((batch_size, config.data.length), dtype=jnp.int32)
+                jnp.ones((batch_size, config.data.length + 1), dtype=jnp.int32)
             ] * iterations
             batch_queue: queue.Queue[Array] = queue.Queue()
             for batch in batches:

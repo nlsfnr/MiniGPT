@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import NamedTuple, Optional, Tuple, TypeVar, Union, Callable
+from typing import Callable, NamedTuple, Optional, Tuple, TypeVar, Union
 
 import haiku as hk
 import jax
@@ -466,7 +466,8 @@ def _set_amp_policy(config: Config) -> jmp.Policy:
     hk.mixed_precision.set_policy(nn.FeedForward, policy)
     hk.mixed_precision.set_policy(hk.Embed, policy)
     hk.mixed_precision.set_policy(hk.Linear, policy)
-    hk.mixed_precision.set_policy(hk.LayerNorm, policy)
+    ln_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=half)
+    hk.mixed_precision.set_policy(hk.LayerNorm, ln_policy)
     return policy
 
 
