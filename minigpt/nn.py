@@ -258,6 +258,8 @@ class Model(hk.Module):
         logits: Array = jnp.einsum(
             "b s m, v m -> b s v", final_hidden, embedding.embeddings
         )
+        if indices.shape[0] > 1:
+            breakpoint()
         return logits
 
     @classmethod

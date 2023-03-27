@@ -166,6 +166,8 @@ class Trainer(threading.Thread):
         self.params = _broadcast_to_devices(self.params)
         self.opt_state = _broadcast_to_devices(self.opt_state)
         self.loss_scale = _broadcast_to_devices(self.loss_scale)
+        # Set the policy again, as it is bound to the current thread
+        self._policy = _set_amp_policy(self.config)
         while True:
             with_gradients = (
                 self.log_gradients_frequency is not None
