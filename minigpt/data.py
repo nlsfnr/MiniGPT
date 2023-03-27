@@ -1,5 +1,4 @@
 import itertools
-import random
 from typing import (
     Any,
     Callable,
@@ -9,6 +8,7 @@ from typing import (
     MutableMapping,
     Sequence,
     TypeVar,
+    Union,
 )
 
 import datasets
@@ -25,6 +25,14 @@ logger = get_logger()
 Sample = MutableMapping[str, Any]
 Batch = MutableMapping[str, Sequence[Any]]
 TokenizerFn = Callable[[Sequence[str]], Sequence[Sequence[int]]]
+
+
+def _to_rng(seed_or_rng: Union[int, np.random.Generator]) -> np.random.Generator:
+    return (
+        np.random.default_rng(seed_or_rng)
+        if isinstance(seed_or_rng, int)
+        else seed_or_rng
+    )
 
 
 def _stream_huggingface_dataset(
@@ -69,12 +77,14 @@ def load_huggingface_dataset(
         raise TypeError(f"Expected args to be a sequence of str, got {args}")
     args = list(args)
     kwargs = dict(kwargs)
+    key = kwargs.pop("key", "text")
     for epoch in itertools.count():
         logger.info(
             f"Streaming dataset from HuggingFace: {args}, {kwargs} (epoch: {epoch})"
         )
         dataset = load_dataset_fn(*args, **kwargs)
-        yield from (dict(sample) for sample in dataset)
+        samples = (dict(text=sample[key]) for sample in dataset)
+        yield from samples
         if not repeat_forever:
             break
 
@@ -83,11 +93,11 @@ def merge_datasets(
     *,
     datasets: Iterable[Iterable[Sample]],
     weights: Iterable[float],
-    seed: int,
+    seed_or_rng: Union[int, np.random.Generator],
 ) -> Iterable[Sample]:
     p = np.array(list(weights), dtype=float)
     p = p / p.sum()
-    rng = np.random.default_rng(seed)
+    rng = _to_rng(seed_or_rng)
     iterators = [iter(dataset) for dataset in datasets]
     while True:
         index = rng.choice(len(iterators), p=p)
@@ -165,59 +175,23 @@ def tokenize_samples(
         yield sample
 
 
-def truncate_and_pad(
-    samples: Iterable[Sample],
+def chain_and_split(
+    *,
+    arrays: Iterable[Iterable[int]],
     length: int,
-    min_length: int,
-    pad_token_id: int,
-    input_key: str = "input_ids",
-    output_key: str = "input_ids",
-) -> Iterable[Sample]:
-    """Truncate and pad samples to the desired length.
+) -> Iterable[Iterable[int]]:
+    """Chain token ids and split them into chunks of the desired length. Equal
+    to the process in https://arxiv.org/pdf/2204.02311.pdf, section 5.
 
     Args:
-        samples: Samples to truncate and pad.
-        length: Length to truncate and pad to.
-        pad_token_id: Token ID to use for padding.
-        input_key: Key in the sample to use as input. Defaults to `input_ids`.
-        output_key: Key in the sample to use as output. Defaults to `input_ids`.
+        arrays: Arrays to chain and split.
+        length: Length to split to.
 
     Returns:
-        Truncated and padded samples.
+        Chained and split samples.
     """
-    for sample in samples:
-        sample = dict(sample)
-        ids = sample[input_key]
-        for chunk in chunks(ids, length):
-            if len(chunk) < min_length:
-                continue
-            if len(chunk) < length:
-                chunk = list(chunk) + [pad_token_id] * (length - len(chunk))
-            sample[output_key] = chunk
-            yield sample
-
-
-def collate(
-    samples: Iterable[Sample],
-    batch_size: int,
-    input_key: str = "input_ids",
-) -> Iterable[np.ndarray]:
-    """Collate samples into batches, converting them to numpy arrays.
-
-    Args:
-        samples: Samples to collate.
-        batch_size: Batch size to use.
-        input_key: Key in the sample to use as input. Defaults to `input_ids`.
-
-    Returns:
-        Collated samples as numpy arrays.
-    """
-    values = (sample[input_key] for sample in samples)
-    batched_values = chunks(values, batch_size, drop_last=True)
-    for batch in batched_values:
-        if not all(len(value) == len(batch[0]) for value in batch[1:]):
-            raise ValueError(f"Expected equal sample lengths, got {batch}")
-        yield np.array(batch, dtype=np.int32)
+    ids = (id for array in arrays for id in array)
+    yield from chunks(ids, length)
 
 
 def chunks(
@@ -242,39 +216,35 @@ def chunks(
 
 
 def shuffle(
-    samples: Iterable[Sample],
+    xs: Iterable[T],
     buffer_size: int,
-    seed: int = 0,
-) -> Iterable[Sample]:
-    """Shuffle samples.
+    seed_or_rng: Union[int, np.random.Generator],
+) -> Iterable[T]:
+    """Shuffle an iterable using a buffer of a given size.
 
     Args:
-        samples: Samples to shuffle.
+        xs: Iterable to shuffle.
         buffer_size: Size of the buffer to use for shuffling.
         seed: Seed to use for shuffling.
 
     Returns:
-        Shuffled samples.
+        Shuffled iterable.
     """
     if buffer_size <= 0:
         raise ValueError(f"Expected buffer_size > 0, got {buffer_size}")
-    rng = random.Random(seed)
-    buffer: List[Sample] = []
-    for sample in samples:
-        sample = dict(sample)
-        if len(buffer) < buffer_size:
-            buffer.append(sample)
-        else:
-            index = rng.randrange(len(buffer))
-            buffer[index], x = sample, buffer[index]
-            yield x
-    rng.shuffle(buffer)
-    yield from buffer
+    rng = _to_rng(seed_or_rng)
+    buffer: List[T] = list(itertools.islice(xs, buffer_size))
+    for x in xs:
+        index = rng.integers(len(buffer))
+        buffer[index], x = x, buffer[index]
+        yield x
+    yield from rng.permutation(np.array(buffer), 0)
 
 
 def batches_from_config(
     config: Config,
-    seed: int,
+    seed_or_rng: Union[int, np.random.Generator],
+    *,
     extra_length: int = 0,
 ) -> Iterable[np.ndarray]:
     """Pipeline to load batches from a configuration.
@@ -291,6 +261,7 @@ def batches_from_config(
     Returns:
         Iterable of batches.
     """
+    rng = _to_rng(seed_or_rng)
     datasets = (
         load_huggingface_dataset(
             args=ds.args,
@@ -299,22 +270,33 @@ def batches_from_config(
         )
         for ds in config.dataset
     )
+    # Shuffle the samples of each dataset. This prevents the samples from
+    # low-frequency datasets to be almost sequential due to a too-small buffer
+    # size for the final shuffle.
+    datasets = (
+        shuffle(
+            xs=ds,
+            buffer_size=config.data.per_dataset_shuffle_buffer_size,
+            seed_or_rng=rng,
+        )
+        for ds in datasets
+    )
     weights = (ds.weight for ds in config.dataset)
-    dataset = merge_datasets(datasets=datasets, weights=weights, seed=seed)
+    dataset = merge_datasets(datasets=datasets, weights=weights, seed_or_rng=rng)
     tokenizer = load_huggingface_tokenizer(
         args=config.tokenizer.args,
         kwargs=config.tokenizer.kwargs,
     )
     dataset = tokenize_samples(dataset, tokenizer)
-    dataset = truncate_and_pad(
-        samples=dataset,
-        length=config.data.length + extra_length,
-        min_length=config.data.min_length + extra_length,
-        pad_token_id=config.data.pad_token_id,
-    )
-    dataset = shuffle(
-        samples=dataset,
+    idss: Iterable[Iterable[int]]
+    idss = (sample["input_ids"] for sample in dataset)
+    idss = chain_and_split(arrays=idss, length=config.data.length + extra_length)
+    # Shuffle the individual chunks
+    idss = shuffle(
+        xs=idss,
         buffer_size=config.data.shuffle_buffer_size,
-        seed=seed,
+        seed_or_rng=rng,
     )
-    return collate(dataset, config.data.batch_size)
+    batches = chunks(idss, size=config.data.batch_size)
+    arrays = (np.array(batch, dtype=np.int32) for batch in batches)
+    return arrays

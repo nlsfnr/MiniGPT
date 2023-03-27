@@ -2,7 +2,6 @@ import random
 import string
 from typing import Callable, Iterable, Mapping, Sequence
 
-import numpy as np
 from tokenizers import Tokenizer
 
 import minigpt.data as data
@@ -55,33 +54,6 @@ def test_tokenize_samples(tokenizer: Tokenizer):
     assert "input_ids" in sample
     assert isinstance(sample["input_ids"], Sequence)
     assert isinstance(sample["input_ids"][0], int)
-
-
-def test_truncate_and_pad(tokenizer: Tokenizer):
-    dataset_fn = mock_dataset_fn()
-    dataset = data.load_huggingface_dataset([], {}, dataset_fn)
-    dataset = data.tokenize_samples(dataset, tokenizer)
-    dataset = data.truncate_and_pad(dataset, 10, 0, 0)
-    assert isinstance(dataset, Iterable)
-    sample = next(iter(dataset))
-    assert isinstance(sample, Mapping)
-    assert "input_ids" in sample
-    assert isinstance(sample["input_ids"], Sequence)
-    assert isinstance(sample["input_ids"][0], int)
-    assert len(sample["input_ids"]) == 10
-
-
-def test_collate(tokenizer: Tokenizer):
-    dataset_fn = mock_dataset_fn()
-    dataset = data.load_huggingface_dataset([], {}, dataset_fn)
-    dataset = data.tokenize_samples(dataset, tokenizer)
-    dataset = data.truncate_and_pad(dataset, 10, 0, 0)
-    batches = data.collate(dataset, 100)
-    assert isinstance(batches, Iterable)
-    batch = next(iter(batches))
-    assert isinstance(batch, np.ndarray)
-    assert batch.shape == (100, 10)
-    assert batch.dtype == np.int32
 
 
 def test_shuffle():

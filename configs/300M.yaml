@@ -1,17 +1,26 @@
 dataset:
-  args: [c4, en]
-  kwargs: {split: train}
+  - args: [c4, en]  # 305 GB
+    kwargs: {split: train}
+    weight: 305  # 1:1
+  - args: [wikitext, wikitext-103-raw-v1]  # 0.5 GB
+    kwargs: {split: train}
+    weight: 3  # 6:1
+  - args: [bookcorpusopen]  # 6.3 GB
+    kwargs: {split: train}
+    weight: 37.8  # 6:1
+  - args: [multi_news]  # 0.7 GB
+    kwargs: {split: train, key: document}
+    weight: 4.2  # 6:1
 
 tokenizer:
   args: [bert-base-uncased]
   kwargs: {}
 
 data:
-  length: 1024
-  min_length: 768
-  pad_token_id: 0
+  length: 512
   batch_size: 8
-  shuffle_buffer_size: 50_000
+  shuffle_buffer_size: 25_000
+  per_dataset_shuffle_buffer_size: 1_000
 
 model:
   num_layers: 18
@@ -33,6 +42,7 @@ optimizer:
   gradient_clip_norm: 1.0
   adam_b1: 0.9
   adam_b2: 0.999
+  adam_eps: 0.00000001
 
 mixed_precision:
   enable: true

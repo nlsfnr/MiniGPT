@@ -385,11 +385,10 @@ def _loss_fn(
     targets = indices[:, 1:]
     seq_len = inputs.shape[1]
     mask = jnp.tril(jnp.full((seq_len, seq_len), True, dtype=bool))
-    is_valid = (targets != config.data.pad_token_id).astype(jnp.float32)
     # Compute the loss
     logits = model(inputs, is_training=True, mask=mask)
     losses = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
-    loss = jnp.mean(losses * is_valid) / jnp.mean(is_valid)
+    loss = jnp.mean(losses)
     return loss_scale.scale(loss), _LossFnAux(loss=loss)
 
 
@@ -414,7 +413,7 @@ def _get_optimizer(
     optimizer = optax.chain(
         optax.clip_by_global_norm(cfg.gradient_clip_norm),
         # Adam + weight decay = AdamW
-        optax.scale_by_adam(b1=cfg.adam_b1, b2=cfg.adam_b2),
+        optax.scale_by_adam(b1=cfg.adam_b1, b2=cfg.adam_b2, eps=cfg.adam_eps),
         optax.add_decayed_weights(weight_decay=cfg.weight_decay),
         # We want gradient descent not ascent, so we negate the learning rate
         optax.scale_by_schedule(lambda step: -lr_schedule(step)),

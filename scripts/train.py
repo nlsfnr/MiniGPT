@@ -61,8 +61,8 @@ def cli(
               help="Wandb run name. Default None.")
 @click.option("--wandb-tags", "-wt", type=str, multiple=True, default=[],
               help="Wandb tags. Default []")
-@click.option("--data-buffer", "-db", type=int, default=10,
-              help="Data buffer size. Default 10.")
+@click.option("--data-buffer", "-db", type=int, default=1000,
+              help="Data buffer size. Default 1000.")
 @click.option("--event-buffer", "-eb", type=int, default=10,
               help="Event buffer size. Default 10.")
 @click.option("--detect-anomalies", "-da", is_flag=True,
