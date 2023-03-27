@@ -69,12 +69,29 @@ def load_huggingface_dataset(
         raise TypeError(f"Expected args to be a sequence of str, got {args}")
     args = list(args)
     kwargs = dict(kwargs)
-    while True:
-        logger.info(f"Streaming dataset from HuggingFace: {args}, {kwargs}")
+    for epoch in itertools.count():
+        logger.info(
+            f"Streaming dataset from HuggingFace: {args}, {kwargs} (epoch: {epoch})"
+        )
         dataset = load_dataset_fn(*args, **kwargs)
         yield from (dict(sample) for sample in dataset)
         if not repeat_forever:
             break
+
+
+def merge_datasets(
+    *,
+    datasets: Iterable[Iterable[Sample]],
+    weights: Iterable[float],
+    seed: int,
+) -> Iterable[Sample]:
+    p = np.array(list(weights), dtype=float)
+    p = p / p.sum()
+    rng = np.random.default_rng(seed)
+    iterators = [iter(dataset) for dataset in datasets]
+    while True:
+        index = rng.choice(len(iterators), p=p)
+        yield next(iterators[index])
 
 
 def tokenizer_from_config(
@@ -274,11 +291,16 @@ def batches_from_config(
     Returns:
         Iterable of batches.
     """
-    dataset = load_huggingface_dataset(
-        args=config.dataset.args,
-        kwargs=config.dataset.kwargs,
-        repeat_forever=True,
+    datasets = (
+        load_huggingface_dataset(
+            args=ds.args,
+            kwargs=ds.kwargs,
+            repeat_forever=True,
+        )
+        for ds in config.dataset
     )
+    weights = (ds.weight for ds in config.dataset)
+    dataset = merge_datasets(datasets=datasets, weights=weights, seed=seed)
     tokenizer = load_huggingface_tokenizer(
         args=config.tokenizer.args,
         kwargs=config.tokenizer.kwargs,

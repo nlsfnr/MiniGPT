@@ -464,8 +464,7 @@ def _set_amp_policy(config: Config) -> jmp.Policy:
     hk.mixed_precision.set_policy(nn.FeedForward, policy)
     hk.mixed_precision.set_policy(hk.Embed, policy)
     hk.mixed_precision.set_policy(hk.Linear, policy)
-    ln_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=half)
-    hk.mixed_precision.set_policy(hk.LayerNorm, ln_policy)
+    hk.mixed_precision.set_policy(hk.LayerNorm, policy)
     return policy
 
 

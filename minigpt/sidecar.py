@@ -196,7 +196,7 @@ def save_to_directory(
             yield event
             continue
         path = Path(event.path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
         event.config.to_yaml(path / "config.yaml")
         with atomic_open(path / "params.pkl", "wb") as f:
             pickle.dump(event.params, f)

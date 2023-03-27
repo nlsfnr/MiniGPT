@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, Optional, Union
+from typing import Optional, Union
 
 import haiku as hk
 import jax
@@ -15,13 +15,6 @@ from .common import Config, get_logger
 _SMALL_INIT = hk.initializers.VarianceScaling(0.01)
 
 logger = get_logger()
-
-
-def full_precision(fn: Callable[[Array], Array]) -> Callable[[Array], Array]:
-    def inner(x: Array) -> Array:
-        return fn(x.astype(jnp.float32)).astype(x.dtype)
-
-    return inner
 
 
 def rotary_pos_emb(
