@@ -29,7 +29,7 @@ model:
   model_dim: 768
   num_heads: 12
   pos_emb_portion: 0.5
-  hidden_dim: 3_072
+  hidden_dim: 2_304
   dropout: 0.0
 
 optimizer:
