@@ -83,7 +83,7 @@ def load_huggingface_dataset(
             f"Streaming dataset from HuggingFace: {args}, {kwargs} (epoch: {epoch})"
         )
         dataset = load_dataset_fn(*args, **kwargs)
-        samples = (dict(text=sample[key]) for sample in dataset)
+        samples = (dict(text=sample[key]) for sample in dataset if sample[key])
         yield from samples
         if not repeat_forever:
             break
