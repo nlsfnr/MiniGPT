@@ -14,15 +14,15 @@ from .sidecar import (
     new_wandb_run,
     save_to_directory,
 )
-from .threading_utils import BufferedIterator, IteratorAsQueue, queue_as_iterator
+from .threading_utils import IteratorAsQueue, ReraisingThread, queue_as_iterator
 from .training import Event, Trainer, TrainStep
 
 __all__ = (
-    "BufferedIterator",
     "Config",
     "Event",
     "IteratorAsQueue",
     "Model",
+    "ReraisingThread",
     "TrainStep",
     "Trainer",
     "accumulate_gac_steps",

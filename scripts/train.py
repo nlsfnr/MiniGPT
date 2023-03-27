@@ -136,10 +136,8 @@ def train_new(
 
     batch_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=data_buffer)
     trainer_event_queue: queue.Queue[minigpt.Event] = queue.Queue(maxsize=event_buffer)
-    sidecar_event_queue: queue.Queue[minigpt.Event] = queue.Queue()
     trainer_termination_event = threading.Event()
     batch_termination_event = threading.Event()
-    sidecar_termination_event = threading.Event()
 
     def batches_fn() -> Iterator[np.ndarray]:
         assert isinstance(seed, int)
@@ -153,7 +151,7 @@ def train_new(
         termination_event=batch_termination_event,
     )
 
-    def sidecar_fn() -> Iterator[minigpt.Event]:
+    def sidecar_fn() -> None:
         events = minigpt.queue_as_iterator(trainer_event_queue)
         events = minigpt.log_time_per_step(
             events=events,
@@ -168,13 +166,10 @@ def train_new(
         if detect_anomalies:
             events = minigpt.detect_anomalies(events=events)
         events = minigpt.save_to_directory(events=events)
-        return iter(events)
+        for event in events:
+            del event
 
-    sidecar_thread = minigpt.IteratorAsQueue(
-        iterator_fn=sidecar_fn,
-        queue=sidecar_event_queue,
-        termination_event=sidecar_termination_event,
-    )
+    sidecar_thread = minigpt.ReraisingThread(target=sidecar_fn)
 
     trainer_thread = minigpt.Trainer(
         batch_queue=batch_queue,
@@ -193,10 +188,10 @@ def train_new(
     )
 
     with batch_queue_thread, sidecar_thread, trainer_thread:
-        events = minigpt.queue_as_iterator(sidecar_event_queue)
         try:
-            for event in events:
-                del event
+            batch_queue_thread.join()
+            trainer_thread.join()
+            sidecar_thread.join()
         except KeyboardInterrupt:
             try:
                 logger.info("Keyboard interrupt received. Graceful shutdown...")
@@ -211,7 +206,6 @@ def train_new(
                 logger.info("Keyboard interrupt received again. Hard shutdown...")
                 batch_termination_event.set()
                 trainer_termination_event.set()
-                sidecar_termination_event.set()
         finally:
             logger.info("Training ended.")
 
