@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from functools import partial
-from typing import Optional, Union
+from functools import partial, wraps
+from typing import Optional, Union, Callable
 
 import haiku as hk
 import jax
@@ -16,6 +16,14 @@ _SMALL_INIT = hk.initializers.VarianceScaling(0.01)
 
 logger = get_logger()
 
+
+def full_precision(fn: Callable[[Array], Array]) -> Callable[[Array], Array]:
+
+    @wraps(fn)
+    def inner(x: Array) -> Array:
+        return fn(x.astype(jnp.float32)).astype(x.dtype)
+
+    return inner
 
 def rotary_pos_emb(
     x: Array,  # B H S D
@@ -101,7 +109,7 @@ class MultiHeadAttention(hk.Module):
         _apply_mask = lambda l_, m_: (l_ if m_ is None else jnp.where(m_, l_, -jnp.inf))
         with jax.debug_infs(False):
             l = hk.remat(_apply_mask)(l, mask)
-            a = jax.nn.softmax(l)  # B H L L
+            a = full_precision(jax.nn.softmax)(l)  # B H L L
         # Attention output
         y: Array = jnp.einsum("b h i j, b h j v -> b h i v", a, v)  # B H L V
         y = rearrange(y, "b h l v -> b l (h v)")  # B L (H V)

@@ -36,7 +36,7 @@ model:
 # Then, in 24h, we have about 370_000 device batches.
 
 optimizer:
-  #                                      70_000       140_000
+  # device batch                         70_000       140_000
   gradient_accumulation_steps: [[0, 8], [8_750, 16], [13_125, 32]]
   weight_decay: 0.01
   lr_min: 0.00006

@@ -459,15 +459,16 @@ def _get_loss_scale(
 def _set_amp_policy(config: Config) -> jmp.Policy:
     full = jnp.dtype(jnp.float32)
     half = jnp.dtype(jnp.float16 if config.mixed_precision.enable else jnp.float32)
+    policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=half)
+    hk.mixed_precision.set_policy(hk.LayerNorm, policy)
     policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=half)
-    hk.mixed_precision.set_policy(nn.Model, policy)
     hk.mixed_precision.set_policy(nn.Block, policy)
     hk.mixed_precision.set_policy(nn.MultiHeadAttention, policy)
     hk.mixed_precision.set_policy(nn.FeedForward, policy)
     hk.mixed_precision.set_policy(hk.Embed, policy)
     hk.mixed_precision.set_policy(hk.Linear, policy)
-    ln_policy = jmp.Policy(param_dtype=full, compute_dtype=full, output_dtype=half)
-    hk.mixed_precision.set_policy(hk.LayerNorm, ln_policy)
+    policy = jmp.Policy(param_dtype=full, compute_dtype=half, output_dtype=full)
+    hk.mixed_precision.set_policy(nn.Model, policy)
     return policy
 
 
