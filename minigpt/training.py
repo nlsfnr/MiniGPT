@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import NamedTuple, Optional, Tuple, TypeVar, Union
+from typing import NamedTuple, Optional, Tuple, TypeVar, Union, Callable
 
 import haiku as hk
 import jax
@@ -418,7 +418,10 @@ def _get_optimizer(
         # We want gradient descent not ascent, so we negate the learning rate
         optax.scale_by_schedule(lambda step: -lr_schedule(step)),
     )
-    # Assemble the multi-steps optimizer for GAS
+    return optax.MultiSteps(optimizer, _batch_size_schedule(config))
+
+
+def _batch_size_schedule(config: Config) -> Callable[[Array], Array]:
     step_gas_pairs = tuple(config.optimizer.gradient_accumulation_steps)
     if not all(isinstance(s, int) and isinstance(g, int) for s, g in step_gas_pairs):
         raise TypeError(
@@ -432,9 +435,7 @@ def _get_optimizer(
         )
     pairs = sorted(step_gas_pairs, key=lambda x: x[0])
     steps, gass = map(jnp.array, zip(*pairs))
-    return optax.MultiSteps(
-        optimizer, lambda step: jnp.max(jnp.where(steps <= step, gass, 1))
-    )
+    return lambda step: jnp.max(jnp.where(steps <= step, gass, 1))
 
 
 def _get_loss_scale(

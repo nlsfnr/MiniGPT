@@ -129,9 +129,8 @@ class FeedForward(hk.Module):
         gate_proj = projection(self.hidden_dim, name="gate_proj")
         out_proj = projection(model_dim, name="out_proj", w_init=_SMALL_INIT)
         # Feed-forward
-        gate = gate_proj(x)  # B L H
-        act = in_proj(x)  # B L H
-        y = out_proj(hk.remat(jax.nn.silu)(act) * gate)  # B L M
+        gated_act = hk.remat(lambda g, a: jax.nn.silu(g) * a)
+        y = out_proj(gated_act(gate_proj(x), in_proj(x)))  # B L M
         return y
 
 
