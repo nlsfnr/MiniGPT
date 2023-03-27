@@ -3,6 +3,7 @@ import queue
 import sys
 from pathlib import Path
 from typing import Optional
+import threading
 
 import click
 import jax.numpy as jnp
@@ -58,6 +59,7 @@ def cli(
             with trainer_thread:
                 for _ in range(iterations):
                     next(events)
+                trainer_thread.terminate()
 
         try:
             fn()
