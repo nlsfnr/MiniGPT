@@ -27,6 +27,9 @@ def accumulate_gac_steps(
     *,
     events: Iterable[Event],
 ) -> Iterable[Event]:
+    """Accumulate gradient accumulation steps. This way, only the last
+    step of the accumulation is propagated, with the mean loss over all
+    of its sub-steps."""
     losses = []
     gradients = None
     params = None
@@ -66,6 +69,8 @@ def log_losses(
     frequency: int,
     log_fn: Callable[[str], None] = logger.info,
 ) -> Iterable[Event]:
+    """Log the mean loss and standard deviation over the last `frequency`
+    steps."""
     losses = []
     for event in events:
         if isinstance(event, EndOfTraining):
@@ -98,6 +103,8 @@ def log_time_per_step(
     percentiles: Iterable[int],
     log_fn: Callable[[str], None] = logger.info,
 ) -> Iterable[Event]:
+    """Log the time per step over the last `frequency` steps. Concretely, log
+    the given percentiles of the time between each step."""
     if frequency < 100:
         raise ValueError(f"Expected frequency to be at least 100, got {frequency}")
     percentiles = tuple(percentiles)
@@ -133,6 +140,7 @@ def log_time_per_step(
 def detect_anomalies(
     events: Iterable[Event],
 ) -> Iterable[Event]:
+    """Detect anomalies in the gradients and loss such as NaNs and infs."""
     for event in events:
         if isinstance(event, EndOfTraining):
             yield event
@@ -188,6 +196,8 @@ def save_to_directory(
     *,
     events: Iterable[Event],
 ) -> Iterable[Event]:
+    """Save the parameters, optimizer state, etc. to the directory specified
+    in the `Save` event."""
     for event in events:
         if isinstance(event, EndOfTraining):
             yield event
@@ -231,6 +241,7 @@ def load_from_directory_for_inference(
     *,
     path: Path,
 ) -> LoadResultForInference:
+    """Load the parameters and config from the directory specified in the `Load` event."""
     config = Config.from_yaml(path / "config.yaml")
     with open(path / "params.pkl", "rb") as f:
         params = pickle.load(f)
@@ -245,6 +256,8 @@ def load_from_directory(
     *,
     path: Path,
 ) -> LoadResult:
+    """Load the parameters, optimiser state, config etc. from the directory
+    specified."""
     config = Config.from_yaml(path / "config.yaml")
     with open(path / "params.pkl", "rb") as f:
         params = pickle.load(f)
@@ -273,6 +286,7 @@ def log_to_wandb(
     events: Iterable[Event],
     run: WandbRun,
 ) -> Iterable[Event]:
+    """Log the parameters, gradients, loss, etc. to wandb."""
     for event in events:
         if isinstance(event, EndOfTraining):
             yield event
